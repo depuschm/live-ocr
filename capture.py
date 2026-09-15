@@ -15,6 +15,7 @@ from collections import deque
 
 import numpy as np
 
+from sinks import make_event
 from window_track import RelativeRegion, WindowNotAvailable, WindowTracker
 
 
@@ -367,6 +368,9 @@ class ScreenReader(threading.Thread):
         self.regions = []                 # list[Region], order matters
         self.preview_request = None       # Region awaiting a preview grab
 
+        self.bus = None                   # optional EventBus
+        self.profile = ""                 # stamped onto published events
+
         self._last_status = {}
 
     def run(self):
@@ -441,9 +445,20 @@ class ScreenReader(threading.Thread):
             fresh = region.new_lines(text)
             if fresh:
                 self.out.put(("text", (region.name, "\n".join(fresh))))
+                self._publish(region, fresh)
         elif text != region._last_text:
             region._last_text = text
             self.out.put(("text", (region.name, text)))
+            self._publish(region, text.splitlines())
+
+    def _publish(self, region, lines):
+        """One event per line - simpler for a downstream consumer to handle."""
+        if self.bus is None:
+            return
+        for line in lines:
+            line = line.strip()
+            if line:
+                self.bus.publish(make_event(self.profile, region.name, line))
 
     def _do_preview(self, sct, region):
         try:

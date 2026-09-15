@@ -16,6 +16,7 @@ import time
 import tkinter as tk
 from tkinter import simpledialog, ttk
 
+import config
 from capture import OCREngine, Region, ScreenReader
 from window_track import WindowNotAvailable, WindowTracker
 
@@ -108,17 +109,30 @@ class App:
         self.ocr = OCREngine()
         self.reader = ScreenReader(self.ocr, self.queue)
 
+        saved_regions, settings = config.load()
+
         self.autoscroll = tk.BooleanVar(value=True)
-        self.on_top = tk.BooleanVar(value=False)
-        self.enhance = tk.BooleanVar(value=True)
-        self.new_only = tk.BooleanVar(value=True)
-        self.scale_with_window = tk.BooleanVar(value=False)
+        self.on_top = tk.BooleanVar(value=settings["always_on_top"])
+        self.enhance = tk.BooleanVar(value=settings["enhance"])
+        self.new_only = tk.BooleanVar(value=settings["new_lines_only"])
+        self.scale_with_window = tk.BooleanVar(value=settings["scale_with_window"])
+
+        self.reader.regions = saved_regions
+        self.reader.interval = settings["interval"]
+        self.reader.enhance = settings["enhance"]
+        self.reader.new_lines_only = settings["new_lines_only"]
 
         self._preview_img = None   # keep a reference or Tk drops the image
-        self._counter = 0
+        self._counter = len(saved_regions)
 
         self._build_widgets()
+        self.interval_box.set(str(settings["interval"]))
+        self._set_on_top()
+        self._redraw_list(keep=0 if saved_regions else None)
         self._refresh_windows()
+        if saved_regions:
+            n = len(saved_regions)
+            self._status(f"Restored {n} region{'s' if n != 1 else ''}")
         self._load_engine_async()
         self.root.after(100, self._drain_queue)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -212,6 +226,9 @@ class App:
             side="left"
         )
         ttk.Button(btns2, text="Reselect area", command=self._reselect_region).pack(
+            side="left", padx=(3, 0)
+        )
+        ttk.Button(btns2, text="On/Off", width=7, command=self._toggle_enabled).pack(
             side="left", padx=(3, 0)
         )
 
@@ -310,6 +327,7 @@ class App:
 
         self.reader.regions.append(region)
         self._redraw_list(keep=len(self.reader.regions) - 1)
+        self._save()
         self._status(f"Added {region.name}: {region.describe()}")
         self._request_preview()
 
@@ -326,6 +344,7 @@ class App:
         except WindowNotAvailable as e:
             self._status(f"Could not anchor region - {e}")
             return
+        self._save()
         self._status(f"{region.name}: {region.describe()}")
         self._request_preview()
 
@@ -350,6 +369,7 @@ class App:
             self._status("Select a region first")
             return
         name = self.reader.regions.pop(i).name
+        self._save()
         self._redraw_list(keep=min(i, len(self.reader.regions) - 1))
         self._status(f"Deleted {name}")
 
@@ -363,6 +383,7 @@ class App:
         regions = self.reader.regions
         regions[i], regions[j] = regions[j], regions[i]
         self._redraw_list(keep=j)
+        self._save()
 
     def _rename_region(self):
         region = self._selected_region()
@@ -374,6 +395,32 @@ class App:
         if name and name.strip():
             region.name = name.strip()
             self._redraw_list(keep=self._selected_index())
+            self._save()
+
+    def _toggle_enabled(self):
+        region = self._selected_region()
+        if region is None:
+            self._status("Select a region first")
+            return
+        region.enabled = not region.enabled
+        self._redraw_list(keep=self._selected_index())
+        self._save()
+        self._status(f"{region.name}: {'enabled' if region.enabled else 'disabled'}")
+
+    def _save(self):
+        """Persist regions and settings. Silent on success."""
+        ok = config.save(
+            self.reader.regions,
+            {
+                "interval": self.reader.interval,
+                "enhance": self.enhance.get(),
+                "new_lines_only": self.new_only.get(),
+                "scale_with_window": self.scale_with_window.get(),
+                "always_on_top": self.on_top.get(),
+            },
+        )
+        if not ok:
+            self._status(f"Could not write {config.CONFIG_PATH}")
 
     def _on_select_region(self, _event=None):
         self._update_preview_info()
@@ -486,11 +533,14 @@ class App:
             self.reader.interval = max(0.2, float(self.interval_box.get()))
         except ValueError:
             self.interval_box.set(str(self.reader.interval))
+            return
+        self._save()
 
     def _set_flags(self):
         self.reader.enhance = self.enhance.get()
         self.reader.new_lines_only = self.new_only.get()
         self.reader.reset()
+        self._save()
 
     def _refresh_windows(self):
         titles = [SCREEN_TARGET]
@@ -509,6 +559,7 @@ class App:
         self.status.config(text=msg)
 
     def _on_close(self):
+        self._save()
         self.reader.running.clear()
         self.reader.alive.clear()
         self.root.destroy()

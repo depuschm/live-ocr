@@ -65,6 +65,28 @@ class RelativeRegion:
         self.fx, self.fy = dx / ww, dy / wh
         self.fw, self.fh = self.w / ww, self.h / wh
 
+    def to_dict(self):
+        return {
+            "w": self.w, "h": self.h, "mode": self.mode,
+            "base_w": self.base_w, "base_h": self.base_h,
+            "from_right": self.from_right, "from_bottom": self.from_bottom,
+            "off_x": self.off_x, "off_y": self.off_y,
+            "fx": self.fx, "fy": self.fy, "fw": self.fw, "fh": self.fh,
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        """Rebuild from stored fields, bypassing the window-relative __init__."""
+        obj = cls.__new__(cls)
+        obj.w, obj.h = d["w"], d["h"]
+        obj.mode = d.get("mode", "anchored")
+        obj.base_w, obj.base_h = d["base_w"], d["base_h"]
+        obj.from_right, obj.from_bottom = d["from_right"], d["from_bottom"]
+        obj.off_x, obj.off_y = d["off_x"], d["off_y"]
+        obj.fx, obj.fy = d["fx"], d["fy"]
+        obj.fw, obj.fh = d["fw"], d["fh"]
+        return obj
+
     def resolve(self, win_box):
         """Return absolute screen coordinates for the window's current bounds."""
         wl, wt, ww, wh = win_box

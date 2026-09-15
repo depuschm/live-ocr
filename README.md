@@ -58,10 +58,19 @@ Each region is read once per interval and its text appears in the log tagged wit
 | **Rename** | Give it a meaningful name — this is what labels its output. Double-clicking works too. |
 | **Reselect area** | Redraw the box without recreating the region. |
 | **Preview** | Live thumbnail of what the selected region is capturing. Updates while running; selecting a region while stopped grabs a fresh frame. |
+| **On/Off** | Skip a region without deleting it. Disabled regions show `(off)` and cost nothing. |
 
 Each region has its own target, so you can mix freely — one following your editor, another pinned to a fixed corner of the screen.
 
 Regions also dedupe independently, so the same value appearing in two of them is reported in both rather than suppressed in whichever is scanned second.
+
+### Saved between runs
+
+Regions and settings are written to `~/.live-ocr/config.json` after every change, so a crash won't lose your setup. Writes are atomic — a temporary file replaced into place — so an interruption mid-write can't leave a truncated config.
+
+Window-anchored regions store the window title and reattach on their own. If the app isn't open when you launch, that region waits and starts working the moment it appears; you don't need to reselect it. Matching is on the exact title, so an app that puts the current filename in its title bar won't match after you switch files.
+
+A corrupt or unreadable config starts you empty rather than crashing, and a single malformed region is skipped while the rest load. Delete the file to reset.
 
 ### Capture
 
@@ -108,6 +117,7 @@ Capture and OCR run on a worker thread that never touches a widget — results r
 | `live_ocr.py` | UI and entry point |
 | `capture.py` | Regions, preprocessing, OCR backends, capture worker |
 | `window_track.py` | Window bounds tracking and window-relative geometry |
+| `config.py` | Saving and loading regions and settings |
 
 ## Known limitations
 
@@ -116,7 +126,7 @@ Capture and OCR run on a worker thread that never touches a widget — results r
 - Text over busy backgrounds (video, gradients) is unreliable.
 - The interval is a floor, not a guarantee — a pass over several large regions can take longer than the interval itself.
 - Line dedupe is exact-match, so a line the OCR reads slightly differently between frames will be reported twice.
-- Regions aren't saved between runs.
+- Saved window regions match on exact window title, so apps that change their title bar (an editor showing the open filename) won't reattach.
 
 ## Requirements
 

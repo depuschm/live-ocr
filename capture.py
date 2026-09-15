@@ -163,8 +163,19 @@ class Region:
     def resolve(self, sct):
         """Absolute coordinates to grab right now."""
         if self.mode == "window":
+            # A saved region comes back with a title but no tracker, and the
+            # window may not exist yet. Retry each cycle so it starts working
+            # whenever the app is opened.
             if self.tracker is None:
-                raise WindowNotAvailable(f"{self.name}: no window attached")
+                if not self.window_title:
+                    raise WindowNotAvailable(f"{self.name}: no window attached")
+                self.tracker = WindowTracker()
+                try:
+                    self.tracker.attach(self.window_title)
+                except WindowNotAvailable:
+                    self.tracker = None
+                    raise
+
             box = self.tracker.box()      # raises WindowNotAvailable
             if self.rel is not None:
                 return self.rel.resolve(box)
@@ -174,6 +185,36 @@ class Region:
         if self.abs_region is not None:
             return dict(self.abs_region)
         return dict(sct.monitors[1])      # whole primary monitor
+
+    # -- persistence ------------------------------------------------------
+
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "mode": self.mode,
+            "window_title": self.window_title,
+            "enabled": self.enabled,
+            "abs_region": self.abs_region,
+            "rel": self.rel.to_dict() if self.rel is not None else None,
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        """
+        Rebuild a saved region. Window-mode regions are left unattached; the
+        tracker is created lazily on first resolve, so a region whose window
+        isn't open yet waits instead of failing to load.
+        """
+        region = cls(
+            d.get("name", "Region"),
+            mode=d.get("mode", "screen"),
+            window_title=d.get("window_title"),
+        )
+        region.enabled = bool(d.get("enabled", True))
+        region.abs_region = d.get("abs_region")
+        rel = d.get("rel")
+        region.rel = RelativeRegion.from_dict(rel) if rel else None
+        return region
 
     def describe(self):
         if self.mode == "window":

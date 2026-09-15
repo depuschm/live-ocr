@@ -2,7 +2,7 @@
 
 Cross-platform screen OCR that continuously reads on-screen text into a desktop window.
 
-Define one or more capture regions, anchor them to application windows, and watch the text in them stream into a labelled log. Regions follow their window as it moves and resizes, and text is only re-read when it actually changes.
+Define one or more capture regions, anchor them to application windows, and watch the text in them stream into a labelled log. Regions follow their window as it moves and resizes, save between runs, and group into named profiles for different projects.
 
 ## Why
 
@@ -46,7 +46,7 @@ The backend is chosen automatically — RapidOCR if present, Tesseract otherwise
 3. Repeat for as many regions as you need.
 4. **Start**.
 
-Each region is read once per interval and its text appears in the log tagged with the region's name.
+Each region is read once per interval and its text appears in the log tagged with the region's name. Your setup is saved automatically — see [Profiles](#profiles) for keeping separate sets per project.
 
 ### Regions
 
@@ -64,13 +64,28 @@ Each region has its own target, so you can mix freely — one following your edi
 
 Regions also dedupe independently, so the same value appearing in two of them is reported in both rather than suppressed in whichever is scanned second.
 
-### Saved between runs
+### Profiles
 
-Regions and settings are written to `~/.live-ocr/config.json` after every change, so a crash won't lose your setup. Writes are atomic — a temporary file replaced into place — so an interruption mid-write can't leave a truncated config.
+Each profile holds its own regions and settings, so you can keep one set up for build logs, another for a trading screen, and switch between them from the dropdown. The active profile shows in the window title.
+
+| Control | What it does |
+| --- | --- |
+| **New** | Empty profile. |
+| **Duplicate** | Copy the current regions and settings under a new name. |
+| **Rename** | Refused if the name is already taken. |
+| **Delete** | Asks first. You can't delete the last remaining profile. |
+
+Profiles live in `~/.live-ocr/profiles/`, one JSON file each — `Build logs` becomes `build-logs.json`. One file per profile means you can copy one to another machine, commit one into a project repo, or delete it by hand without disturbing the others. `~/.live-ocr/state.json` remembers which was last open.
+
+Everything is written after each change rather than on exit, so a crash won't lose your setup, and writes are atomic — a temporary file replaced into place — so an interruption can't leave a truncated file. Switching profiles saves the current one first.
+
+A corrupt or unreadable profile loads empty rather than crashing, and a single malformed region is skipped while the rest load. Delete the file to reset that profile.
+
+Upgrading from a version before profiles: the old `config.json` is migrated into a profile named `Default` on first launch, and the original is kept as `config.json.migrated`.
+
+### Window regions across restarts
 
 Window-anchored regions store the window title and reattach on their own. If the app isn't open when you launch, that region waits and starts working the moment it appears; you don't need to reselect it. Matching is on the exact title, so an app that puts the current filename in its title bar won't match after you switch files.
-
-A corrupt or unreadable config starts you empty rather than crashing, and a single malformed region is skipped while the rest load. Delete the file to reset.
 
 ### Capture
 
@@ -117,7 +132,7 @@ Capture and OCR run on a worker thread that never touches a widget — results r
 | `live_ocr.py` | UI and entry point |
 | `capture.py` | Regions, preprocessing, OCR backends, capture worker |
 | `window_track.py` | Window bounds tracking and window-relative geometry |
-| `config.py` | Saving and loading regions and settings |
+| `config.py` | Profiles: saving and loading regions and settings |
 
 ## Known limitations
 

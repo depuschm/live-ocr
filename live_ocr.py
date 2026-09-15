@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import simpledialog, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 import config
 from capture import OCREngine, Region, ScreenReader
@@ -109,7 +109,8 @@ class App:
         self.ocr = OCREngine()
         self.reader = ScreenReader(self.ocr, self.queue)
 
-        saved_regions, settings = config.load()
+        self.profile = config.get_active()
+        saved_regions, settings = config.load(self.profile)
 
         self.autoscroll = tk.BooleanVar(value=True)
         self.on_top = tk.BooleanVar(value=settings["always_on_top"])
@@ -129,10 +130,12 @@ class App:
         self.interval_box.set(str(settings["interval"]))
         self._set_on_top()
         self._redraw_list(keep=0 if saved_regions else None)
+        self._refresh_profiles()
         self._refresh_windows()
-        if saved_regions:
-            n = len(saved_regions)
-            self._status(f"Restored {n} region{'s' if n != 1 else ''}")
+        n = len(saved_regions)
+        self._status(
+            f"Profile {self.profile!r} - {n} region{'s' if n != 1 else ''}"
+        )
         self._load_engine_async()
         self.root.after(100, self._drain_queue)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -140,6 +143,7 @@ class App:
     # -- layout -----------------------------------------------------------
 
     def _build_widgets(self):
+        self._build_profile_bar()
         self._build_toolbar()
 
         panes = ttk.PanedWindow(self.root, orient="horizontal")
@@ -158,6 +162,30 @@ class App:
             padding=(10, 4), relief="sunken",
         )
         self.status.pack(fill="x", side="bottom")
+
+    def _build_profile_bar(self):
+        bar = ttk.Frame(self.root, padding=(8, 8, 8, 0))
+        bar.pack(fill="x")
+
+        ttk.Label(bar, text="Profile").pack(side="left", padx=(0, 4))
+        self.profile_box = ttk.Combobox(bar, state="readonly", width=26)
+        self.profile_box.pack(side="left")
+        self.profile_box.bind("<<ComboboxSelected>>", self._on_switch_profile)
+
+        ttk.Button(bar, text="New", width=5, command=self._new_profile).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Button(bar, text="Duplicate", command=self._duplicate_profile).pack(
+            side="left", padx=(3, 0)
+        )
+        ttk.Button(bar, text="Rename", command=self._rename_profile).pack(
+            side="left", padx=(3, 0)
+        )
+        ttk.Button(bar, text="Delete", command=self._delete_profile).pack(
+            side="left", padx=(3, 0)
+        )
+
+        ttk.Separator(self.root, orient="horizontal").pack(fill="x", pady=(8, 0))
 
     def _build_toolbar(self):
         bar = ttk.Frame(self.root, padding=(8, 8, 8, 0))
@@ -397,6 +425,125 @@ class App:
             self._redraw_list(keep=self._selected_index())
             self._save()
 
+    # -- profiles ---------------------------------------------------------
+
+    def _refresh_profiles(self):
+        names = config.list_profiles()
+        if self.profile not in names:
+            names = sorted(set(names + [self.profile]), key=str.lower)
+        self.profile_box["values"] = names
+        self.profile_box.set(self.profile)
+        self.root.title(f"live-ocr - {self.profile}")
+
+    def _switch_to(self, name):
+        """Save what we have, then load the other profile in its place."""
+        self._save()
+        was_running = self.reader.running.is_set()
+        self.reader.running.clear()
+
+        regions, settings = config.load(name)
+        self.profile = name
+        self.reader.regions = regions
+        self.reader.interval = settings["interval"]
+        self.reader.enhance = settings["enhance"]
+        self.reader.new_lines_only = settings["new_lines_only"]
+        self.reader.reset()
+
+        self.enhance.set(settings["enhance"])
+        self.new_only.set(settings["new_lines_only"])
+        self.scale_with_window.set(settings["scale_with_window"])
+        self.on_top.set(settings["always_on_top"])
+        self.interval_box.set(str(settings["interval"]))
+        self._set_on_top()
+
+        self._counter = len(regions)
+        self._redraw_list(keep=0 if regions else None)
+        self._refresh_profiles()
+        config.set_active(name)
+
+        if was_running and regions:
+            self.reader.running.set()
+        else:
+            self.toggle_btn.config(text="Start")
+
+        n = len(regions)
+        self._status(f"Profile {name!r} - {n} region{'s' if n != 1 else ''}")
+
+    def _on_switch_profile(self, _event=None):
+        name = self.profile_box.get()
+        if name and name != self.profile:
+            self._switch_to(name)
+
+    def _ask_profile_name(self, title, initial=""):
+        name = simpledialog.askstring(
+            title, "Profile name:", initialvalue=initial, parent=self.root
+        )
+        if name is None:
+            return None
+        name = name.strip()
+        if not name:
+            self._status("Name cannot be empty")
+            return None
+        if config.exists(name) and name != self.profile:
+            self._status(f"A profile named {name!r} already exists")
+            return None
+        return name
+
+    def _new_profile(self):
+        name = self._ask_profile_name("New profile")
+        if name is None:
+            return
+        self._save()
+        config.save(name, [], dict(config.DEFAULT_SETTINGS))
+        self._switch_to(name)
+
+    def _duplicate_profile(self):
+        name = self._ask_profile_name("Duplicate profile", f"{self.profile} copy")
+        if name is None:
+            return
+        config.save(name, self.reader.regions, self._settings())
+        self._switch_to(name)
+
+    def _rename_profile(self):
+        name = self._ask_profile_name("Rename profile", self.profile)
+        if name is None or name == self.profile:
+            return
+        self._save()
+        if not config.rename(self.profile, name):
+            self._status(f"Could not rename to {name!r}")
+            return
+        self.profile = name
+        config.set_active(name)
+        self._refresh_profiles()
+        self._status(f"Renamed profile to {name!r}")
+
+    def _delete_profile(self):
+        names = config.list_profiles()
+        if len(names) <= 1:
+            self._status("Cannot delete the only profile")
+            return
+        if not messagebox.askyesno(
+            "Delete profile",
+            f"Delete profile {self.profile!r} and its regions?",
+            parent=self.root,
+        ):
+            return
+        gone = self.profile
+        config.delete(gone)
+        remaining = [n for n in config.list_profiles() if n != gone]
+        self.profile = remaining[0]
+        self._switch_to(self.profile)
+        self._status(f"Deleted profile {gone!r}")
+
+    def _settings(self):
+        return {
+            "interval": self.reader.interval,
+            "enhance": self.enhance.get(),
+            "new_lines_only": self.new_only.get(),
+            "scale_with_window": self.scale_with_window.get(),
+            "always_on_top": self.on_top.get(),
+        }
+
     def _toggle_enabled(self):
         region = self._selected_region()
         if region is None:
@@ -408,19 +555,10 @@ class App:
         self._status(f"{region.name}: {'enabled' if region.enabled else 'disabled'}")
 
     def _save(self):
-        """Persist regions and settings. Silent on success."""
-        ok = config.save(
-            self.reader.regions,
-            {
-                "interval": self.reader.interval,
-                "enhance": self.enhance.get(),
-                "new_lines_only": self.new_only.get(),
-                "scale_with_window": self.scale_with_window.get(),
-                "always_on_top": self.on_top.get(),
-            },
-        )
-        if not ok:
-            self._status(f"Could not write {config.CONFIG_PATH}")
+        """Persist the active profile. Silent on success."""
+        if not config.save(self.profile, self.reader.regions, self._settings()):
+            self._status(f"Could not write {config.path_for(self.profile)}")
+        config.set_active(self.profile)
 
     def _on_select_region(self, _event=None):
         self._update_preview_info()

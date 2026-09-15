@@ -25,7 +25,6 @@ from capture import Region
 CONFIG_DIR = Path.home() / ".live-ocr"
 PROFILE_DIR = CONFIG_DIR / "profiles"
 STATE_PATH = CONFIG_DIR / "state.json"
-LEGACY_PATH = CONFIG_DIR / "config.json"
 
 VERSION = 1
 DEFAULT_PROFILE = "Default"
@@ -88,7 +87,6 @@ def _read_json(path):
 
 def list_profiles():
     """Display names of every stored profile, sorted."""
-    _migrate_legacy()
     names = []
     try:
         files = sorted(PROFILE_DIR.glob("*.json"))
@@ -104,7 +102,6 @@ def list_profiles():
 
 def load(name):
     """Return (regions, settings) for a profile. Never raises."""
-    _migrate_legacy()
     settings = dict(DEFAULT_SETTINGS)
     data = _read_json(path_for(name))
     if data is None:
@@ -184,23 +181,3 @@ def get_active():
 
 def set_active(name):
     return _write_json(STATE_PATH, {"active": name})
-
-
-# --------------------------------------------------------------------------
-# Migration
-# --------------------------------------------------------------------------
-
-
-def _migrate_legacy():
-    """Move a pre-profiles config.json into profiles/default.json, once."""
-    if not LEGACY_PATH.exists() or path_for(DEFAULT_PROFILE).exists():
-        return
-    data = _read_json(LEGACY_PATH)
-    if data is None:
-        return
-    data["name"] = DEFAULT_PROFILE
-    if _write_json(path_for(DEFAULT_PROFILE), data):
-        try:
-            LEGACY_PATH.rename(CONFIG_DIR / "config.json.migrated")
-        except OSError:
-            pass

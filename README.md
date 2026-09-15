@@ -81,8 +81,6 @@ Everything is written after each change rather than on exit, so a crash won't lo
 
 A corrupt or unreadable profile loads empty rather than crashing, and a single malformed region is skipped while the rest load. Delete the file to reset that profile.
 
-Upgrading from a version before profiles: the old `config.json` is migrated into a profile named `Default` on first launch, and the original is kept as `config.json.migrated`.
-
 ### Window regions across restarts
 
 Window-anchored regions store the window title and reattach on their own. If the app isn't open when you launch, that region waits and starts working the moment it appears; you don't need to reselect it. Matching is on the exact title, so an app that puts the current filename in its title bar won't match after you switch files.

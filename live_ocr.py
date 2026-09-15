@@ -19,6 +19,8 @@ from tkinter import ttk
 
 import numpy as np
 
+from window_track import RelativeRegion, WindowNotAvailable, WindowTracker
+
 
 # --------------------------------------------------------------------------
 # Image preprocessing
@@ -180,6 +182,10 @@ class ScreenReader(threading.Thread):
         self.enhance = True
         self.new_lines_only = True
 
+        self.tracker = WindowTracker()    # optional window attachment
+        self.rel_region = None            # RelativeRegion when attached
+
+        self._last_status = None
         self._last_frame_hash = None
         self._last_text = None
         self._seen = deque(maxlen=self.SEEN_HISTORY)
@@ -196,7 +202,15 @@ class ScreenReader(threading.Thread):
                     continue
 
                 try:
-                    area = self.region or sct.monitors[self.monitor_index]
+                    area = self._area(sct)
+                except WindowNotAvailable as e:
+                    # The window moved out of reach rather than the capture
+                    # breaking. Wait for it instead of stopping.
+                    self._status(f"Waiting - {e}")
+                    time.sleep(max(0.5, self.interval))
+                    continue
+
+                try:
                     shot = sct.grab(area)
                 except Exception as e:
                     self.out.put(("error", f"Capture failed: {e}"))
@@ -219,6 +233,26 @@ class ScreenReader(threading.Thread):
 
                 self._emit(text)
                 time.sleep(self.interval)
+
+    def _area(self, sct):
+        """
+        Where to grab from. When attached to a window this is recomputed every
+        cycle, so the region follows the window as it moves and resizes.
+        """
+        if self.tracker.attached:
+            box = self.tracker.box()  # raises WindowNotAvailable
+            if self.rel_region:
+                return self.rel_region.resolve(box)
+            left, top, width, height = box
+            return {"left": left, "top": top, "width": width, "height": height}
+
+        return self.region or sct.monitors[self.monitor_index]
+
+    def _status(self, msg):
+        """Push a status line, but only when it actually changes."""
+        if msg != self._last_status:
+            self._last_status = msg
+            self.out.put(("status", msg))
 
     def _emit(self, text):
         if not text:
@@ -261,6 +295,7 @@ class ScreenReader(threading.Thread):
     def reset(self):
         self._last_frame_hash = None
         self._last_text = None
+        self._last_status = None
         self._seen.clear()
         self._seen_set.clear()
 
@@ -355,8 +390,11 @@ class App:
         self.on_top = tk.BooleanVar(value=False)
         self.enhance = tk.BooleanVar(value=True)
         self.new_only = tk.BooleanVar(value=True)
+        self.scale_with_window = tk.BooleanVar(value=False)
 
         self._build_widgets()
+        if WindowTracker.available():
+            self._refresh_windows()  # after _build_widgets: needs the status bar
         self._load_engine_async()
         self.root.after(100, self._drain_queue)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -392,6 +430,29 @@ class App:
         ttk.Button(bar, text="Copy all", command=self._copy_all).pack(
             side="right", padx=(0, 6)
         )
+
+        win_row = ttk.Frame(self.root, padding=(8, 0, 8, 4))
+        win_row.pack(fill="x")
+
+        ttk.Label(win_row, text="Window").pack(side="left", padx=(0, 4))
+        self.window_box = ttk.Combobox(win_row, state="readonly", width=38)
+        self.window_box.pack(side="left")
+
+        self.attach_btn = ttk.Button(
+            win_row, text="Attach", width=9, command=self._toggle_attach
+        )
+        self.attach_btn.pack(side="left", padx=(6, 0))
+        ttk.Button(win_row, text="Refresh", command=self._refresh_windows).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Checkbutton(
+            win_row, text="Scale region with window",
+            variable=self.scale_with_window,
+        ).pack(side="left", padx=(12, 0))
+
+        if not WindowTracker.available():
+            self.window_box.config(state="disabled")
+            self.attach_btn.config(state="disabled")
 
         opts = ttk.Frame(self.root, padding=(8, 0, 8, 4))
         opts.pack(fill="x")
@@ -456,6 +517,8 @@ class App:
 
                 if kind == "text":
                     self._append(payload)
+                elif kind == "status":
+                    self._status(payload)
                 elif kind == "ready":
                     self.toggle_btn.config(state="normal")
                     self.reader.start()
@@ -533,19 +596,75 @@ class App:
 
         self.root.deiconify()
         if region:
-            self.reader.region = region
-            self.reader.reset()
-            self._status(
-                f"Region set: {region['width']}x{region['height']} "
-                f"at {region['left']},{region['top']}"
-            )
+            self._apply_region(region)
         if was_running:
             self.reader.running.set()
 
+    def _apply_region(self, region):
+        size = f"{region['width']}x{region['height']}"
+
+        if self.reader.tracker.attached:
+            try:
+                box = self.reader.tracker.box()
+            except WindowNotAvailable as e:
+                self._status(f"Could not anchor region - {e}")
+                return
+            mode = "proportional" if self.scale_with_window.get() else "anchored"
+            self.reader.rel_region = RelativeRegion(box, region, mode=mode)
+            self.reader.region = None
+            self._status(f"Region {size} anchored to {self.reader.tracker.title!r}")
+        else:
+            self.reader.region = region
+            self.reader.rel_region = None
+            self._status(
+                f"Region set: {size} at {region['left']},{region['top']}"
+            )
+
+        self.reader.reset()
+
     def _clear_region(self):
         self.reader.region = None
+        self.reader.rel_region = None
         self.reader.reset()
-        self._status("Capturing full screen")
+        if self.reader.tracker.attached:
+            self._status(f"Capturing all of {self.reader.tracker.title!r}")
+        else:
+            self._status("Capturing full screen")
+
+    # -- window attachment ------------------------------------------------
+
+    def _refresh_windows(self):
+        titles = WindowTracker.list_titles()
+        self.window_box["values"] = titles
+        if titles and not self.window_box.get():
+            self.window_box.current(0)
+        self._status(f"Found {len(titles)} windows")
+
+    def _toggle_attach(self):
+        if self.reader.tracker.attached:
+            self.reader.tracker.detach()
+            self.reader.rel_region = None
+            self.reader.reset()
+            self.attach_btn.config(text="Attach")
+            self._status("Detached - capturing the screen directly")
+            return
+
+        title = self.window_box.get().strip()
+        if not title:
+            self._status("Pick a window first")
+            return
+
+        try:
+            left, top, width, height = self.reader.tracker.attach(title)
+        except WindowNotAvailable as e:
+            self._status(str(e))
+            return
+
+        self.reader.region = None
+        self.reader.rel_region = None
+        self.reader.reset()
+        self.attach_btn.config(text="Detach")
+        self._status(f"Attached to {title!r} ({width}x{height}) - whole window")
 
     def _set_on_top(self):
         self.root.attributes("-topmost", self.on_top.get())

@@ -102,7 +102,6 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("live-ocr")
-        root.minsize(840, 600)
 
         self.queue = queue.Queue()
         self.ocr = OCREngine()
@@ -295,6 +294,7 @@ class App:
     def _build_output(self, parent):
         self.text = tk.Text(
             parent, wrap="word", font=("TkFixedFont", 11),
+            width=40, height=12,
             bg="#1e1e1e", fg="#e8e8e8", insertbackground="#e8e8e8",
             relief="flat", padx=10, pady=8, state="disabled",
         )
@@ -437,9 +437,20 @@ class App:
 
     def _restore_geometry(self):
         """
-        Reuse the last window size, or pick a default that fits the whole
-        left panel - clamped to the screen so it still works on a laptop.
+        Size from what the layout actually asks for rather than hardcoded
+        pixels, so a different DPI, font scale, or platform theme still fits.
+
+        Setting minsize to the required size is what stops controls being
+        clipped: the window cannot be dragged smaller than its own contents.
         """
+        self.root.update_idletasks()
+        req_w = self.root.winfo_reqwidth()
+        req_h = self.root.winfo_reqheight()
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+
+        self.root.minsize(min(req_w, screen_w - 40), min(req_h, screen_h - 80))
+
         saved = config.get_geometry()
         if saved:
             try:
@@ -448,9 +459,10 @@ class App:
             except tk.TclError:
                 pass
 
-        w = min(1060, self.root.winfo_screenwidth() - 80)
-        h = min(780, self.root.winfo_screenheight() - 120)
-        self.root.geometry(f"{max(840, w)}x{max(600, h)}")
+        # A little headroom over the minimum, so the log pane opens usable.
+        self.root.geometry(
+            f"{min(req_w + 260, screen_w - 80)}x{min(req_h + 40, screen_h - 120)}"
+        )
 
     # -- profiles ---------------------------------------------------------
 

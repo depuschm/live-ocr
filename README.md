@@ -1,17 +1,8 @@
 # live-ocr
 
-Cross-platform screen OCR that continuously reads on-screen text and prints it to the console.
+Cross-platform screen OCR that continuously reads on-screen text into a desktop window.
 
-Point it at your screen (or a region of it), type `start`, and any text that appears gets extracted and printed. Text is only re-read when it actually changes, so a static screen costs almost nothing.
-
-```
-> start
-Capturing every 1.0s. Type 'stop' to pause.
-
---- 14:22:07 ---
-Deploy failed: connection timed out after 30s
-Retrying in 60 seconds...
-```
+Pick a region of your screen, hit Start, and any text that appears gets extracted and appended to a scrolling log with timestamps. Text is only re-read when it actually changes, so a static screen costs almost nothing.
 
 ## Why
 
@@ -23,9 +14,17 @@ It also installs entirely through pip. No Tesseract binary, no package manager s
 
 ```bash
 pip install mss numpy rapidocr-onnxruntime
+python live_ocr.py
 ```
 
-First run downloads the OCR models (~10 seconds, once).
+First run downloads the OCR models (~10 seconds, once). The window opens immediately and Start stays disabled until they're ready.
+
+The UI uses tkinter, which ships with Python on Windows and macOS. Some Linux distributions package it separately:
+
+```bash
+sudo apt install python3-tk       # Debian / Ubuntu
+sudo dnf install python3-tkinter  # Fedora
+```
 
 <details>
 <summary>Using Tesseract instead</summary>
@@ -37,52 +36,48 @@ pip install mss numpy pytesseract
 # plus the tesseract binary for your OS
 ```
 
-The backend is chosen automatically — RapidOCR if present, Tesseract otherwise.
+The backend is chosen automatically — RapidOCR if present, Tesseract otherwise. The status bar shows which one is active.
 </details>
 
-## Usage
+## Using it
 
-```bash
-python screenread.py
-```
-
-| Command | What it does |
+| Control | What it does |
 | --- | --- |
-| `start` | Begin capturing |
-| `stop` | Pause without shutting down |
-| `interval 0.5` | Seconds between captures (default `1.0`) |
-| `region 0,0,800,600` | Limit capture to `left,top,width,height` |
-| `region full` | Go back to the whole monitor |
-| `monitors` | List available monitors and their geometry |
-| `monitor 2` | Switch monitor |
-| `quit` | Exit |
+| **Start / Stop** | Begin or pause capturing. Pausing keeps the OCR engine loaded, so resuming is instant. |
+| **Select region** | Drag a rectangle over the area to watch. The app hides itself first so it doesn't read its own output. |
+| **Full screen** | Clear the region and capture the whole monitor. |
+| **Interval** | Seconds between captures. Default `1.0`. |
+| **Always on top** | Keeps the window visible while you work in another app. |
+| **Auto-scroll** | Follows new output. Turn it off to read back without being yanked to the bottom. |
+| **Copy all** | Everything in the pane to the clipboard. |
 
-`stop` pauses the capture loop but keeps the OCR engine loaded, so toggling back on is instant.
+### Select a region
 
-### Narrow the region
-
-Using `region` is the single biggest win for both speed and accuracy. OCR on a full 4K desktop is slow and picks up menu bars, tab titles, and dock icons you don't want. Run `monitors` to see the coordinate space, then crop to just the part you care about.
+This is the single biggest win for both speed and accuracy. OCR on a full 4K desktop is slow and picks up menu bars, tab titles, and dock icons you don't want. Crop to just the part you care about and results improve noticeably.
 
 ## Platform notes
 
-**macOS** — you'll need to grant screen recording permission under System Settings → Privacy & Security → Screen Recording, for whichever terminal you're running from. Until you do, captures come back as blank or desktop-wallpaper-only images. A restart of the terminal app is usually required after granting it.
+**macOS** — you'll need to grant screen recording permission under System Settings → Privacy & Security → Screen Recording, for whichever terminal you launch from. Until you do, captures come back blank or show only the desktop wallpaper. Restarting the terminal app after granting it is usually required.
 
-**Linux / Wayland** — `mss` may return black frames under Wayland, since it compositor-blocks direct screen access. Running an X11 session is the quick workaround. Under XWayland, results vary by compositor.
+**Linux / Wayland** — `mss` may return black frames under Wayland, since it blocks direct screen access. Running an X11 session is the quick workaround. Under XWayland, results vary by compositor. The region selector's transparency also depends on the window manager — if the overlay appears opaque rather than translucent, that's the cause.
 
-**Windows** — works without additional setup. On multi-DPI setups, `monitors` reports the scaled coordinates, which is what `region` expects.
+**Windows** — works without additional setup. On multi-DPI setups, region coordinates follow the scaled coordinate space.
 
 ## How it works
 
 1. `mss` grabs the target region as a raw frame.
-2. A hash of a downsampled copy of that frame is compared to the previous one. If nothing changed, the frame is discarded before it reaches OCR — this is what keeps a static screen from burning CPU.
-3. Frames that survive go to the OCR engine. Results below a confidence threshold (default `0.5`) are dropped.
-4. The extracted text is compared to the last result and only printed if it differs, which filters out noise like a blinking cursor changing pixels without changing text.
+2. A hash of a downsampled copy is compared to the previous frame. If nothing changed, it's discarded before reaching OCR — this is what keeps a static screen from burning CPU.
+3. Surviving frames go to the OCR engine. Results below a confidence threshold (default `0.5`) are dropped.
+4. Extracted text is compared to the last result and only displayed if it differs, filtering out noise like a blinking cursor changing pixels without changing text.
+
+Capture and OCR run on a worker thread that never touches a widget — results reach the UI over a queue, since tkinter isn't thread-safe.
 
 ## Known limitations
 
-- Small or low-contrast text degrades badly. Upscaling the frame before OCR helps, and isn't currently done automatically.
+- Small or low-contrast text degrades badly. Upscaling before OCR would help and isn't done yet.
 - Text over busy backgrounds (video, gradients) is unreliable.
-- The capture interval is a floor, not a guarantee — OCR on a large region can take longer than the interval itself.
+- The interval is a floor, not a guarantee — OCR on a large region can take longer than the interval itself.
+- Diffing is whole-block, so one changed line in a scrolling log reprints the entire capture.
 
 ## Requirements
 

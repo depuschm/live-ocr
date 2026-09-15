@@ -117,13 +117,16 @@ class App:
         self.enhance = tk.BooleanVar(value=settings["enhance"])
         self.new_only = tk.BooleanVar(value=settings["new_lines_only"])
         self.scale_with_window = tk.BooleanVar(value=settings["scale_with_window"])
+        self.preview_processed = tk.BooleanVar(value=settings["preview_processed"])
 
         self.reader.regions = saved_regions
         self.reader.interval = settings["interval"]
         self.reader.enhance = settings["enhance"]
         self.reader.new_lines_only = settings["new_lines_only"]
+        self.reader.preview_processed = settings["preview_processed"]
 
         self._preview_img = None   # keep a reference or Tk drops the image
+        self._after_id = None
         self._counter = len(saved_regions)
 
         self._build_widgets()
@@ -137,7 +140,7 @@ class App:
             f"Profile {self.profile!r} - {n} region{'s' if n != 1 else ''}"
         )
         self._load_engine_async()
-        self.root.after(100, self._drain_queue)
+        self._after_id = self.root.after(100, self._drain_queue)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # -- layout -----------------------------------------------------------
@@ -282,8 +285,12 @@ class App:
             prev, width=240, height=150, bg="#151515", highlightthickness=0
         )
         self.preview.pack()
+        ttk.Checkbutton(
+            prev, text="Show what OCR sees", variable=self.preview_processed,
+            command=self._set_preview_mode,
+        ).pack(anchor="w", pady=(4, 0))
         self.preview_info = ttk.Label(prev, text="No region selected", wraplength=240)
-        self.preview_info.pack(anchor="w", pady=(4, 0))
+        self.preview_info.pack(anchor="w", pady=(2, 0))
 
     def _build_output(self, parent):
         self.text = tk.Text(
@@ -456,6 +463,8 @@ class App:
         self.new_only.set(settings["new_lines_only"])
         self.scale_with_window.set(settings["scale_with_window"])
         self.on_top.set(settings["always_on_top"])
+        self.preview_processed.set(settings["preview_processed"])
+        self.reader.preview_processed = settings["preview_processed"]
         self.interval_box.set(str(settings["interval"]))
         self._set_on_top()
 
@@ -552,6 +561,7 @@ class App:
             "new_lines_only": self.new_only.get(),
             "scale_with_window": self.scale_with_window.get(),
             "always_on_top": self.on_top.get(),
+            "preview_processed": self.preview_processed.get(),
         }
 
     def _toggle_enabled(self):
@@ -580,6 +590,11 @@ class App:
             self.preview_info.config(text="No region selected")
         else:
             self.preview_info.config(text=f"{region.name}\n{region.describe()}")
+
+    def _set_preview_mode(self):
+        self.reader.preview_processed = self.preview_processed.get()
+        self._save()
+        self._request_preview()  # redraw immediately rather than next cycle
 
     def _request_preview(self):
         region = self._selected_region()
@@ -625,7 +640,7 @@ class App:
         except queue.Empty:
             pass
 
-        self.root.after(100, self._drain_queue)
+        self._after_id = self.root.after(100, self._drain_queue)
 
     # -- text pane --------------------------------------------------------
 
@@ -710,6 +725,11 @@ class App:
         self._save()
         self.reader.running.clear()
         self.reader.alive.clear()
+        if self._after_id is not None:
+            # Cancel the pending drain, or Tk complains about an invalid
+            # command once the widgets are gone.
+            self.root.after_cancel(self._after_id)
+            self._after_id = None
         self.root.destroy()
 
 

@@ -58,6 +58,7 @@ Each region is read once per interval and its text appears in the log tagged wit
 | **Rename** | Give it a meaningful name — this is what labels its output. Double-clicking works too. |
 | **Reselect area** | Redraw the box without recreating the region. |
 | **Preview** | Live thumbnail of what the selected region is capturing. Updates while running; selecting a region while stopped grabs a fresh frame. |
+| **Show what OCR sees** | Switch the preview from raw pixels to the preprocessed frame. |
 | **On/Off** | Skip a region without deleting it. Disabled regions show `(off)` and cost nothing. |
 
 Each region has its own target, so you can mix freely — one following your editor, another pinned to a fixed corner of the screen.
@@ -85,6 +86,12 @@ A corrupt or unreadable profile loads empty rather than crashing, and a single m
 ### Window regions across restarts
 
 Window-anchored regions store the window title and reattach on their own. If the app isn't open when you launch, that region waits and starts working the moment it appears; you don't need to reselect it. Matching is on the exact title, so an app that puts the current filename in its title bar won't match after you switch files.
+
+### When a region reads badly
+
+Tick **Show what OCR sees** to swap the preview from raw pixels to the frame that actually reaches the engine — grayscaled, contrast-stretched, inverted if it was light-on-dark, and upscaled. That usually makes the cause obvious: text too faint after the stretch, an inversion that shouldn't have happened, or a region so large the upscale got capped.
+
+From there, shrinking the region is the most reliable fix. Turning **Enhance image** off is worth a try on content that's already dark-on-light at a comfortable size. With enhancement off the two preview modes show the same thing, since the raw frame is then what OCR receives.
 
 ### Capture
 

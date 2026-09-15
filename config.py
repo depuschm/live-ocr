@@ -37,6 +37,7 @@ DEFAULT_SETTINGS = {
     "new_lines_only": True,
     "scale_with_window": False,
     "always_on_top": False,
+    "preview_processed": False,
 }
 
 

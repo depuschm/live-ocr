@@ -362,6 +362,7 @@ class ScreenReader(threading.Thread):
         self.interval = 1.0
         self.enhance = True
         self.new_lines_only = True
+        self.preview_processed = False    # preview shows what OCR sees
 
         self.regions = []                 # list[Region], order matters
         self.preview_request = None       # Region awaiting a preview grab
@@ -411,10 +412,17 @@ class ScreenReader(threading.Thread):
         if not region.frame_changed(frame):
             return
 
-        self.out.put(("preview", (region.name, to_png_b64(thumbnail(frame)))))
-
         try:
             prepared = preprocess(frame) if self.enhance else frame
+        except Exception as e:
+            self._status(region.name, f"{region.name}: preprocessing failed - {e}")
+            return
+
+        # Preview after preprocessing, so "what OCR sees" is literally true -
+        # with enhancement off, prepared is the raw frame and both agree.
+        self._send_preview(region, prepared if self.preview_processed else frame)
+
+        try:
             text = self.ocr.read(prepared)
         except Exception as e:
             self._status(region.name, f"{region.name}: OCR failed - {e}")
@@ -422,6 +430,9 @@ class ScreenReader(threading.Thread):
 
         self._status(region.name, None)
         self._emit(region, text)
+
+    def _send_preview(self, region, img):
+        self.out.put(("preview", (region.name, to_png_b64(thumbnail(img)))))
 
     def _emit(self, region, text):
         if not text:
@@ -437,10 +448,12 @@ class ScreenReader(threading.Thread):
     def _do_preview(self, sct, region):
         try:
             frame = grab_rgb(sct, region.resolve(sct))
+            if self.preview_processed and self.enhance:
+                frame = preprocess(frame)
         except Exception as e:
             self.out.put(("status", f"{region.name}: preview failed - {e}"))
             return
-        self.out.put(("preview", (region.name, to_png_b64(thumbnail(frame)))))
+        self._send_preview(region, frame)
 
     def _status(self, key, msg):
         """Push a status line, but only when it changes for that region."""

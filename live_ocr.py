@@ -14,9 +14,62 @@ import sys
 import threading
 import time
 import tkinter as tk
+from collections import deque
 from tkinter import ttk
 
 import numpy as np
+
+
+# --------------------------------------------------------------------------
+# Image preprocessing
+# --------------------------------------------------------------------------
+# OCR models are trained mostly on photographed or scanned documents: dark
+# text, light background, reasonably large glyphs. Screen text breaks all
+# three assumptions, so a little preparation buys a lot of accuracy.
+
+MAX_PIXELS_AFTER_SCALE = 8_000_000  # keep upscaled frames to a sane size
+
+
+def _resize(img, factor):
+    try:
+        import cv2  # usually present as a RapidOCR dependency
+
+        return cv2.resize(
+            img, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC
+        )
+    except ImportError:
+        # Nearest-neighbour fallback. Blockier, but it keeps glyph edges hard,
+        # which OCR tolerates better than a blur.
+        return np.repeat(np.repeat(img, factor, axis=0), factor, axis=1)
+
+
+def preprocess(frame, scale=2):
+    """RGB frame in, cleaned-up RGB frame out."""
+    gray = (
+        frame[:, :, 0] * 0.299 + frame[:, :, 1] * 0.587 + frame[:, :, 2] * 0.114
+    )
+
+    # Contrast stretch on percentiles rather than min/max, so one stray white
+    # pixel doesn't flatten everything else.
+    lo, hi = np.percentile(gray, (2, 98))
+    if hi - lo > 1:
+        gray = np.clip((gray - lo) * (255.0 / (hi - lo)), 0, 255)
+
+    # Dark-mode UIs and terminals are light-on-dark, which is the inverse of
+    # what the models expect. Flip them.
+    if gray.mean() < 110:
+        gray = 255.0 - gray
+
+    img = gray.astype(np.uint8)
+
+    # Small UI text often sits below the resolution the model handles well.
+    if scale > 1:
+        if img.size * scale * scale > MAX_PIXELS_AFTER_SCALE:
+            scale = max(1, int((MAX_PIXELS_AFTER_SCALE / img.size) ** 0.5))
+        if scale > 1:
+            img = _resize(img, scale)
+
+    return np.stack([img] * 3, axis=-1)
 
 
 # --------------------------------------------------------------------------
@@ -110,6 +163,8 @@ class ScreenReader(threading.Thread):
     onto a queue that the UI thread drains, because tkinter is not thread-safe.
     """
 
+    SEEN_HISTORY = 400  # lines remembered for dedupe
+
     def __init__(self, ocr, out_queue):
         super().__init__(daemon=True)
         self.ocr = ocr
@@ -122,9 +177,13 @@ class ScreenReader(threading.Thread):
         self.interval = 1.0
         self.monitor_index = 1            # mss: 0 = all screens, 1 = primary
         self.region = None                # dict, or None for full monitor
+        self.enhance = True
+        self.new_lines_only = True
 
         self._last_frame_hash = None
         self._last_text = None
+        self._seen = deque(maxlen=self.SEEN_HISTORY)
+        self._seen_set = set()
 
     def run(self):
         import mss
@@ -151,17 +210,44 @@ class ScreenReader(threading.Thread):
                     continue
 
                 try:
-                    text = self.ocr.read(frame)
+                    prepared = preprocess(frame) if self.enhance else frame
+                    text = self.ocr.read(prepared)
                 except Exception as e:
                     self.out.put(("error", f"OCR failed: {e}"))
                     time.sleep(self.interval)
                     continue
 
-                if text and text != self._last_text:
-                    self._last_text = text
-                    self.out.put(("text", text))
-
+                self._emit(text)
                 time.sleep(self.interval)
+
+    def _emit(self, text):
+        if not text:
+            return
+
+        if self.new_lines_only:
+            fresh = self._new_lines(text)
+            if fresh:
+                self.out.put(("text", "\n".join(fresh)))
+        elif text != self._last_text:
+            self._last_text = text
+            self.out.put(("text", text))
+
+    def _new_lines(self, text):
+        """
+        Return only lines not seen recently. Without this, one changed line in
+        a scrolling log reprints the whole screen every interval.
+        """
+        fresh = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line in self._seen_set:
+                continue
+            if len(self._seen) == self._seen.maxlen:
+                self._seen_set.discard(self._seen[0])  # about to be evicted
+            self._seen.append(line)
+            self._seen_set.add(line)
+            fresh.append(line)
+        return fresh
 
     def _unchanged(self, frame):
         """Cheap gate so identical frames never reach the OCR engine."""
@@ -175,6 +261,8 @@ class ScreenReader(threading.Thread):
     def reset(self):
         self._last_frame_hash = None
         self._last_text = None
+        self._seen.clear()
+        self._seen_set.clear()
 
 
 # --------------------------------------------------------------------------
@@ -210,16 +298,16 @@ class RegionSelector:
             font=("TkDefaultFont", 16),
         )
 
-        state = {"x": 0, "y": 0, "rect": None}
+        state = {"x": 0, "y": 0, "cx": 0, "cy": 0, "rect": None}
 
         def on_press(e):
             state["x"], state["y"] = e.x_root, e.y_root
+            state["cx"], state["cy"] = e.x, e.y
             if state["rect"]:
                 canvas.delete(state["rect"])
             state["rect"] = canvas.create_rectangle(
                 e.x, e.y, e.x, e.y, outline="#4da3ff", width=2
             )
-            state["cx"], state["cy"] = e.x, e.y
 
         def on_drag(e):
             if state["rect"]:
@@ -256,14 +344,17 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("live-ocr")
-        root.geometry("720x520")
-        root.minsize(480, 320)
+        root.geometry("720x540")
+        root.minsize(520, 340)
 
         self.queue = queue.Queue()
         self.ocr = OCREngine()
         self.reader = ScreenReader(self.ocr, self.queue)
+
         self.autoscroll = tk.BooleanVar(value=True)
         self.on_top = tk.BooleanVar(value=False)
+        self.enhance = tk.BooleanVar(value=True)
+        self.new_only = tk.BooleanVar(value=True)
 
         self._build_widgets()
         self._load_engine_async()
@@ -309,6 +400,14 @@ class App:
         )
         ttk.Checkbutton(
             opts, text="Always on top", variable=self.on_top, command=self._set_on_top
+        ).pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(
+            opts, text="Enhance image", variable=self.enhance,
+            command=self._set_flags,
+        ).pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(
+            opts, text="New lines only", variable=self.new_only,
+            command=self._set_flags,
         ).pack(side="left", padx=(12, 0))
 
         wrap = ttk.Frame(self.root, padding=(8, 0, 8, 0))
@@ -417,6 +516,11 @@ class App:
             self.reader.interval = max(0.2, float(self.interval_box.get()))
         except ValueError:
             self.interval_box.set(str(self.reader.interval))
+
+    def _set_flags(self):
+        self.reader.enhance = self.enhance.get()
+        self.reader.new_lines_only = self.new_only.get()
+        self.reader.reset()
 
     def _pick_region(self):
         was_running = self.reader.running.is_set()

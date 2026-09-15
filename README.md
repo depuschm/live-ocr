@@ -2,7 +2,7 @@
 
 Cross-platform screen OCR that continuously reads on-screen text into a desktop window.
 
-Pick a region of your screen, hit Start, and any text that appears gets extracted and appended to a scrolling log with timestamps. Text is only re-read when it actually changes, so a static screen costs almost nothing.
+Define one or more capture regions, anchor them to application windows, and watch the text in them stream into a labelled log. Regions follow their window as it moves and resizes, and text is only re-read when it actually changes.
 
 ## Why
 
@@ -13,13 +13,13 @@ It also installs entirely through pip. No Tesseract binary, no package manager s
 ## Install
 
 ```bash
-pip install mss numpy rapidocr-onnxruntime
+pip install mss numpy rapidocr-onnxruntime pywinctl
 python live_ocr.py
 ```
 
 First run downloads the OCR models (~10 seconds, once). The window opens immediately and Start stays disabled until they're ready.
 
-The UI uses tkinter, which ships with Python on Windows and macOS. Some Linux distributions package it separately:
+`pywinctl` is optional and only powers window attachment — without it you can still define regions against the screen. The UI uses tkinter, which ships with Python on Windows and macOS but is packaged separately on some Linux distributions:
 
 ```bash
 sudo apt install python3-tk       # Debian / Ubuntu
@@ -41,43 +41,82 @@ The backend is chosen automatically — RapidOCR if present, Tesseract otherwise
 
 ## Using it
 
+1. Under **New region target**, pick **Whole screen** or an application window (**Refresh windows** re-scans if it opened after launch).
+2. Click **Add** and drag a box over the area you want to watch.
+3. Repeat for as many regions as you need.
+4. **Start**.
+
+Each region is read once per interval and its text appears in the log tagged with the region's name.
+
+### Regions
+
 | Control | What it does |
 | --- | --- |
-| **Start / Stop** | Begin or pause capturing. Pausing keeps the OCR engine loaded, so resuming is instant. |
-| **Select region** | Drag a rectangle over the area to watch. The app hides itself first so it doesn't read its own output. |
-| **Full screen** | Clear the region and capture the whole monitor. |
-| **Interval** | Seconds between captures. Default `1.0`. |
+| **Add** | Create a region against the current target and drag out its area. |
+| **Delete** | Remove the selected region. |
+| **Up / Down** | Reorder. Regions are scanned in list order. |
+| **Rename** | Give it a meaningful name — this is what labels its output. Double-clicking works too. |
+| **Reselect area** | Redraw the box without recreating the region. |
+| **Preview** | Live thumbnail of what the selected region is capturing. Updates while running; selecting a region while stopped grabs a fresh frame. |
+
+Each region has its own target, so you can mix freely — one following your editor, another pinned to a fixed corner of the screen.
+
+Regions also dedupe independently, so the same value appearing in two of them is reported in both rather than suppressed in whichever is scanned second.
+
+### Capture
+
+| Control | What it does |
+| --- | --- |
+| **Start / Stop** | Begin or pause. Pausing keeps the OCR engine loaded, so resuming is instant. |
+| **Interval** | Seconds between passes over the region list. Default `1.0`. |
+| **Enhance image** | Preprocessing before OCR. On by default; turn off to compare. |
+| **New lines only** | Report only lines not seen recently, instead of the whole capture. |
 | **Always on top** | Keeps the window visible while you work in another app. |
 | **Auto-scroll** | Follows new output. Turn it off to read back without being yanked to the bottom. |
-| **Copy all** | Everything in the pane to the clipboard. |
+| **Copy all** | Everything in the log to the clipboard. |
 
-### Select a region
+### What happens when a window resizes
 
-This is the single biggest win for both speed and accuracy. OCR on a full 4K desktop is slow and picks up menu bars, tab titles, and dock icons you don't want. Crop to just the part you care about and results improve noticeably.
+Two reasonable answers, so it's an explicit choice rather than a guess. Set **Scale with window** before adding a region.
 
-## Platform notes
+**Off (default).** The region keeps its pixel size and stays pinned to whichever corner it was nearest. Usually what you want, because text doesn't get bigger when a window does — a status bar stays glued to the bottom edge, a toolbar stays top-left.
 
-**macOS** — you'll need to grant screen recording permission under System Settings → Privacy & Security → Screen Recording, for whichever terminal you launch from. Until you do, captures come back blank or show only the desktop wallpaper. Restarting the terminal app after granting it is usually required.
+**On.** The region grows and shrinks proportionally. Use this when content genuinely reflows with size, like a full-width document body.
 
-**Linux / Wayland** — `mss` may return black frames under Wayland, since it blocks direct screen access. Running an X11 session is the quick workaround. Under XWayland, results vary by compositor. The region selector's transparency also depends on the window manager — if the overlay appears opaque rather than translucent, that's the cause.
+If a region's window is minimised or closed, that region pauses and the status bar says what it's waiting for, then resumes when the window returns. It won't fall back to reading whatever moved into those coordinates. Other regions keep running.
 
-**Windows** — works without additional setup. On multi-DPI setups, region coordinates follow the scaled coordinate space.
+## Performance
+
+OCR cost scales linearly with region count — four regions at `1.0` means four OCR passes per second. If it can't keep up, raise the interval or delete regions you aren't reading. Unchanged regions are skipped before reaching OCR, so idle areas are nearly free.
+
+Keeping regions small is the single biggest win for both speed and accuracy. OCR over a full 4K desktop is slow and picks up menu bars, tab titles, and dock icons you don't want.
 
 ## How it works
 
-1. `mss` grabs the target region as a raw frame.
-2. A hash of a downsampled copy is compared to the previous frame. If nothing changed, it's discarded before reaching OCR — this is what keeps a static screen from burning CPU.
-3. Surviving frames go to the OCR engine. Results below a confidence threshold (default `0.5`) are dropped.
-4. Extracted text is compared to the last result and only displayed if it differs, filtering out noise like a blinking cursor changing pixels without changing text.
+1. `mss` grabs each region's area. For window-anchored regions that area is recomputed from the window's live bounds every cycle.
+2. A hash of a downsampled copy is compared to that region's previous frame. If nothing changed it's discarded before reaching OCR, which keeps a static screen from burning CPU.
+3. Surviving frames are converted to grayscale, contrast-stretched on the 2nd/98th percentiles, auto-inverted if light-on-dark, and upscaled 2x. OCR models are trained on dark text over light backgrounds at document-scale sizes, and screen text breaks all three assumptions.
+4. Results below a confidence threshold (default `0.5`) are dropped.
+5. Lines are checked against the last 400 that region has seen, and only new ones are displayed.
 
-Capture and OCR run on a worker thread that never touches a widget — results reach the UI over a queue, since tkinter isn't thread-safe.
+Capture and OCR run on a worker thread that never touches a widget — results reach the UI over a queue, since tkinter isn't thread-safe. Preview thumbnails are encoded as base64 PNG, which Tk reads natively, avoiding a Pillow dependency.
+
+## Layout
+
+| File | Contents |
+| --- | --- |
+| `live_ocr.py` | UI and entry point |
+| `capture.py` | Regions, preprocessing, OCR backends, capture worker |
+| `window_track.py` | Window bounds tracking and window-relative geometry |
 
 ## Known limitations
 
-- Small or low-contrast text degrades badly. Upscaling before OCR would help and isn't done yet.
+- **Occlusion.** Capture reads screen pixels, so another window covering your target will be read instead. Anchoring tracks position, not content.
+- Window bounds include the title bar and borders, so a region pinned near the top edge can shift if the title bar height changes.
 - Text over busy backgrounds (video, gradients) is unreliable.
-- The interval is a floor, not a guarantee — OCR on a large region can take longer than the interval itself.
-- Diffing is whole-block, so one changed line in a scrolling log reprints the entire capture.
+- The interval is a floor, not a guarantee — a pass over several large regions can take longer than the interval itself.
+- Line dedupe is exact-match, so a line the OCR reads slightly differently between frames will be reported twice.
+- Regions aren't saved between runs.
 
 ## Requirements
 

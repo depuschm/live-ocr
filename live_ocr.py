@@ -2,11 +2,11 @@
 """
 live_ocr.py - cross-platform screen OCR with a desktop UI.
 
-Captures the screen on an interval, runs OCR, and displays any text that
-changed in a scrolling window.
+Define one or more capture regions, optionally anchored to application
+windows, and watch the text in them stream into a scrolling log.
 
 Install:
-    pip install mss numpy rapidocr-onnxruntime
+    pip install mss numpy rapidocr-onnxruntime pywinctl
 """
 
 import queue
@@ -14,294 +14,16 @@ import sys
 import threading
 import time
 import tkinter as tk
-from collections import deque
-from tkinter import ttk
+from tkinter import simpledialog, ttk
 
-import numpy as np
+from capture import OCREngine, Region, ScreenReader
+from window_track import WindowNotAvailable, WindowTracker
 
-from window_track import RelativeRegion, WindowNotAvailable, WindowTracker
-
-
-# --------------------------------------------------------------------------
-# Image preprocessing
-# --------------------------------------------------------------------------
-# OCR models are trained mostly on photographed or scanned documents: dark
-# text, light background, reasonably large glyphs. Screen text breaks all
-# three assumptions, so a little preparation buys a lot of accuracy.
-
-MAX_PIXELS_AFTER_SCALE = 8_000_000  # keep upscaled frames to a sane size
-
-
-def _resize(img, factor):
-    try:
-        import cv2  # usually present as a RapidOCR dependency
-
-        return cv2.resize(
-            img, None, fx=factor, fy=factor, interpolation=cv2.INTER_CUBIC
-        )
-    except ImportError:
-        # Nearest-neighbour fallback. Blockier, but it keeps glyph edges hard,
-        # which OCR tolerates better than a blur.
-        return np.repeat(np.repeat(img, factor, axis=0), factor, axis=1)
-
-
-def preprocess(frame, scale=2):
-    """RGB frame in, cleaned-up RGB frame out."""
-    gray = (
-        frame[:, :, 0] * 0.299 + frame[:, :, 1] * 0.587 + frame[:, :, 2] * 0.114
-    )
-
-    # Contrast stretch on percentiles rather than min/max, so one stray white
-    # pixel doesn't flatten everything else.
-    lo, hi = np.percentile(gray, (2, 98))
-    if hi - lo > 1:
-        gray = np.clip((gray - lo) * (255.0 / (hi - lo)), 0, 255)
-
-    # Dark-mode UIs and terminals are light-on-dark, which is the inverse of
-    # what the models expect. Flip them.
-    if gray.mean() < 110:
-        gray = 255.0 - gray
-
-    img = gray.astype(np.uint8)
-
-    # Small UI text often sits below the resolution the model handles well.
-    if scale > 1:
-        if img.size * scale * scale > MAX_PIXELS_AFTER_SCALE:
-            scale = max(1, int((MAX_PIXELS_AFTER_SCALE / img.size) ** 0.5))
-        if scale > 1:
-            img = _resize(img, scale)
-
-    return np.stack([img] * 3, axis=-1)
+SCREEN_TARGET = "Whole screen"
 
 
 # --------------------------------------------------------------------------
-# OCR backend
-# --------------------------------------------------------------------------
-
-
-class OCREngine:
-    """Wraps whichever OCR library is installed behind one read() call."""
-
-    def __init__(self, min_confidence=0.5):
-        self.min_confidence = min_confidence
-        self.backend = None
-        self._engine = None
-
-    def load(self):
-        """Slow. Call this off the UI thread."""
-        try:
-            from rapidocr_onnxruntime import RapidOCR
-
-            self._engine = RapidOCR()
-            self.backend = "RapidOCR"
-            return
-        except ImportError:
-            pass
-
-        try:
-            import pytesseract
-
-            self._engine = pytesseract
-            self.backend = "Tesseract"
-            return
-        except ImportError:
-            pass
-
-        raise RuntimeError(
-            "No OCR backend found.\n\n"
-            "Install one:\n"
-            "  pip install rapidocr-onnxruntime   (recommended)\n"
-            "  pip install pytesseract            (also needs the tesseract binary)"
-        )
-
-    def read(self, img):
-        if self.backend == "RapidOCR":
-            return self._read_rapidocr(img)
-        return self._read_tesseract(img)
-
-    def _read_rapidocr(self, img):
-        raw = self._engine(img)
-
-        # RapidOCR's return shape has changed across versions, so normalise
-        # rather than assuming one layout.
-        if raw is None:
-            return ""
-        if isinstance(raw, tuple):
-            raw = raw[0]
-        if raw is None:
-            return ""
-
-        if hasattr(raw, "txts"):  # newer object-style result
-            texts = raw.txts or []
-            scores = getattr(raw, "scores", None) or [1.0] * len(texts)
-            return "\n".join(
-                t for t, s in zip(texts, scores) if s >= self.min_confidence
-            )
-
-        lines = []
-        for item in raw:  # classic [box, text, confidence] rows
-            try:
-                text, conf = item[1], float(item[2])
-            except (IndexError, TypeError, ValueError):
-                continue
-            if conf >= self.min_confidence:
-                lines.append(text)
-        return "\n".join(lines)
-
-    def _read_tesseract(self, img):
-        from PIL import Image
-
-        return self._engine.image_to_string(Image.fromarray(img)).strip()
-
-
-# --------------------------------------------------------------------------
-# Capture worker
-# --------------------------------------------------------------------------
-
-
-class ScreenReader(threading.Thread):
-    """
-    Captures and OCRs in the background. Never touches a widget - results go
-    onto a queue that the UI thread drains, because tkinter is not thread-safe.
-    """
-
-    SEEN_HISTORY = 400  # lines remembered for dedupe
-
-    def __init__(self, ocr, out_queue):
-        super().__init__(daemon=True)
-        self.ocr = ocr
-        self.out = out_queue
-
-        self.running = threading.Event()  # capturing vs paused
-        self.alive = threading.Event()    # thread should keep existing
-        self.alive.set()
-
-        self.interval = 1.0
-        self.monitor_index = 1            # mss: 0 = all screens, 1 = primary
-        self.region = None                # dict, or None for full monitor
-        self.enhance = True
-        self.new_lines_only = True
-
-        self.tracker = WindowTracker()    # optional window attachment
-        self.rel_region = None            # RelativeRegion when attached
-
-        self._last_status = None
-        self._last_frame_hash = None
-        self._last_text = None
-        self._seen = deque(maxlen=self.SEEN_HISTORY)
-        self._seen_set = set()
-
-    def run(self):
-        import mss
-
-        # mss instances are not safe to share across threads, so this is
-        # created here in the worker rather than in __init__.
-        with mss.mss() as sct:
-            while self.alive.is_set():
-                if not self.running.wait(timeout=0.2):
-                    continue
-
-                try:
-                    area = self._area(sct)
-                except WindowNotAvailable as e:
-                    # The window moved out of reach rather than the capture
-                    # breaking. Wait for it instead of stopping.
-                    self._status(f"Waiting - {e}")
-                    time.sleep(max(0.5, self.interval))
-                    continue
-
-                try:
-                    shot = sct.grab(area)
-                except Exception as e:
-                    self.out.put(("error", f"Capture failed: {e}"))
-                    self.running.clear()
-                    continue
-
-                frame = np.array(shot)[:, :, :3][:, :, ::-1]  # BGRA -> RGB
-
-                if self._unchanged(frame):
-                    time.sleep(self.interval)
-                    continue
-
-                try:
-                    prepared = preprocess(frame) if self.enhance else frame
-                    text = self.ocr.read(prepared)
-                except Exception as e:
-                    self.out.put(("error", f"OCR failed: {e}"))
-                    time.sleep(self.interval)
-                    continue
-
-                self._emit(text)
-                time.sleep(self.interval)
-
-    def _area(self, sct):
-        """
-        Where to grab from. When attached to a window this is recomputed every
-        cycle, so the region follows the window as it moves and resizes.
-        """
-        if self.tracker.attached:
-            box = self.tracker.box()  # raises WindowNotAvailable
-            if self.rel_region:
-                return self.rel_region.resolve(box)
-            left, top, width, height = box
-            return {"left": left, "top": top, "width": width, "height": height}
-
-        return self.region or sct.monitors[self.monitor_index]
-
-    def _status(self, msg):
-        """Push a status line, but only when it actually changes."""
-        if msg != self._last_status:
-            self._last_status = msg
-            self.out.put(("status", msg))
-
-    def _emit(self, text):
-        if not text:
-            return
-
-        if self.new_lines_only:
-            fresh = self._new_lines(text)
-            if fresh:
-                self.out.put(("text", "\n".join(fresh)))
-        elif text != self._last_text:
-            self._last_text = text
-            self.out.put(("text", text))
-
-    def _new_lines(self, text):
-        """
-        Return only lines not seen recently. Without this, one changed line in
-        a scrolling log reprints the whole screen every interval.
-        """
-        fresh = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or line in self._seen_set:
-                continue
-            if len(self._seen) == self._seen.maxlen:
-                self._seen_set.discard(self._seen[0])  # about to be evicted
-            self._seen.append(line)
-            self._seen_set.add(line)
-            fresh.append(line)
-        return fresh
-
-    def _unchanged(self, frame):
-        """Cheap gate so identical frames never reach the OCR engine."""
-        small = frame[::8, ::8]
-        h = hash(small.tobytes())
-        if h == self._last_frame_hash:
-            return True
-        self._last_frame_hash = h
-        return False
-
-    def reset(self):
-        self._last_frame_hash = None
-        self._last_text = None
-        self._last_status = None
-        self._seen.clear()
-        self._seen_set.clear()
-
-
-# --------------------------------------------------------------------------
-# Region selector
+# Region selector overlay
 # --------------------------------------------------------------------------
 
 
@@ -379,8 +101,8 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("live-ocr")
-        root.geometry("720x540")
-        root.minsize(520, 340)
+        root.geometry("980x620")
+        root.minsize(760, 440)
 
         self.queue = queue.Queue()
         self.ocr = OCREngine()
@@ -392,9 +114,11 @@ class App:
         self.new_only = tk.BooleanVar(value=True)
         self.scale_with_window = tk.BooleanVar(value=False)
 
+        self._preview_img = None   # keep a reference or Tk drops the image
+        self._counter = 0
+
         self._build_widgets()
-        if WindowTracker.available():
-            self._refresh_windows()  # after _build_widgets: needs the status bar
+        self._refresh_windows()
         self._load_engine_async()
         self.root.after(100, self._drain_queue)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -402,22 +126,35 @@ class App:
     # -- layout -----------------------------------------------------------
 
     def _build_widgets(self):
-        bar = ttk.Frame(self.root, padding=(8, 8, 8, 4))
+        self._build_toolbar()
+
+        panes = ttk.PanedWindow(self.root, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=8, pady=(4, 0))
+
+        left = ttk.Frame(panes, padding=(0, 0, 6, 0))
+        panes.add(left, weight=0)
+        self._build_region_panel(left)
+
+        right = ttk.Frame(panes)
+        panes.add(right, weight=1)
+        self._build_output(right)
+
+        self.status = ttk.Label(
+            self.root, text="Loading OCR engine...", anchor="w",
+            padding=(10, 4), relief="sunken",
+        )
+        self.status.pack(fill="x", side="bottom")
+
+    def _build_toolbar(self):
+        bar = ttk.Frame(self.root, padding=(8, 8, 8, 0))
         bar.pack(fill="x")
 
         self.toggle_btn = ttk.Button(
-            bar, text="Start", width=10, command=self._toggle, state="disabled"
+            bar, text="Start", width=9, command=self._toggle, state="disabled"
         )
         self.toggle_btn.pack(side="left")
 
-        ttk.Button(bar, text="Select region", command=self._pick_region).pack(
-            side="left", padx=(6, 0)
-        )
-        ttk.Button(bar, text="Full screen", command=self._clear_region).pack(
-            side="left", padx=(6, 0)
-        )
-
-        ttk.Label(bar, text="Interval").pack(side="left", padx=(16, 4))
+        ttk.Label(bar, text="Interval").pack(side="left", padx=(14, 4))
         self.interval_box = ttk.Spinbox(
             bar, from_=0.2, to=10.0, increment=0.2, width=5,
             command=self._set_interval,
@@ -426,72 +163,93 @@ class App:
         self.interval_box.bind("<Return>", lambda e: self._set_interval())
         self.interval_box.pack(side="left")
 
-        ttk.Button(bar, text="Clear", command=self._clear_text).pack(side="right")
+        ttk.Checkbutton(
+            bar, text="Enhance image", variable=self.enhance, command=self._set_flags
+        ).pack(side="left", padx=(14, 0))
+        ttk.Checkbutton(
+            bar, text="New lines only", variable=self.new_only, command=self._set_flags
+        ).pack(side="left", padx=(10, 0))
+        ttk.Checkbutton(
+            bar, text="Always on top", variable=self.on_top, command=self._set_on_top
+        ).pack(side="left", padx=(10, 0))
+
+        ttk.Button(bar, text="Clear log", command=self._clear_text).pack(side="right")
         ttk.Button(bar, text="Copy all", command=self._copy_all).pack(
             side="right", padx=(0, 6)
         )
-
-        win_row = ttk.Frame(self.root, padding=(8, 0, 8, 4))
-        win_row.pack(fill="x")
-
-        ttk.Label(win_row, text="Window").pack(side="left", padx=(0, 4))
-        self.window_box = ttk.Combobox(win_row, state="readonly", width=38)
-        self.window_box.pack(side="left")
-
-        self.attach_btn = ttk.Button(
-            win_row, text="Attach", width=9, command=self._toggle_attach
+        ttk.Checkbutton(bar, text="Auto-scroll", variable=self.autoscroll).pack(
+            side="right", padx=(0, 12)
         )
-        self.attach_btn.pack(side="left", padx=(6, 0))
-        ttk.Button(win_row, text="Refresh", command=self._refresh_windows).pack(
-            side="left", padx=(6, 0)
+
+    def _build_region_panel(self, parent):
+        ttk.Label(parent, text="Regions").pack(anchor="w")
+
+        self.region_list = tk.Listbox(
+            parent, width=30, height=10, exportselection=False,
+            activestyle="none", bg="#252525", fg="#e8e8e8",
+            selectbackground="#3a6ea5", highlightthickness=0, relief="flat",
         )
-        ttk.Checkbutton(
-            win_row, text="Scale region with window",
-            variable=self.scale_with_window,
-        ).pack(side="left", padx=(12, 0))
+        self.region_list.pack(fill="both", expand=True, pady=(2, 4))
+        self.region_list.bind("<<ListboxSelect>>", self._on_select_region)
+        self.region_list.bind("<Double-Button-1>", lambda e: self._rename_region())
 
-        if not WindowTracker.available():
-            self.window_box.config(state="disabled")
-            self.attach_btn.config(state="disabled")
+        btns = ttk.Frame(parent)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Add", width=6, command=self._add_region).pack(side="left")
+        ttk.Button(btns, text="Delete", width=7, command=self._delete_region).pack(
+            side="left", padx=(3, 0)
+        )
+        ttk.Button(btns, text="Up", width=4, command=lambda: self._move(-1)).pack(
+            side="left", padx=(3, 0)
+        )
+        ttk.Button(btns, text="Down", width=6, command=lambda: self._move(1)).pack(
+            side="left", padx=(3, 0)
+        )
 
-        opts = ttk.Frame(self.root, padding=(8, 0, 8, 4))
-        opts.pack(fill="x")
-        ttk.Checkbutton(opts, text="Auto-scroll", variable=self.autoscroll).pack(
+        btns2 = ttk.Frame(parent)
+        btns2.pack(fill="x", pady=(3, 0))
+        ttk.Button(btns2, text="Rename", width=8, command=self._rename_region).pack(
+            side="left"
+        )
+        ttk.Button(btns2, text="Reselect area", command=self._reselect_region).pack(
+            side="left", padx=(3, 0)
+        )
+
+        target = ttk.LabelFrame(parent, text="New region target", padding=6)
+        target.pack(fill="x", pady=(8, 0))
+        self.target_box = ttk.Combobox(target, state="readonly", width=26)
+        self.target_box.pack(fill="x")
+        row = ttk.Frame(target)
+        row.pack(fill="x", pady=(4, 0))
+        ttk.Button(row, text="Refresh windows", command=self._refresh_windows).pack(
             side="left"
         )
         ttk.Checkbutton(
-            opts, text="Always on top", variable=self.on_top, command=self._set_on_top
-        ).pack(side="left", padx=(12, 0))
-        ttk.Checkbutton(
-            opts, text="Enhance image", variable=self.enhance,
-            command=self._set_flags,
-        ).pack(side="left", padx=(12, 0))
-        ttk.Checkbutton(
-            opts, text="New lines only", variable=self.new_only,
-            command=self._set_flags,
-        ).pack(side="left", padx=(12, 0))
+            target, text="Scale with window", variable=self.scale_with_window
+        ).pack(anchor="w", pady=(4, 0))
 
-        wrap = ttk.Frame(self.root, padding=(8, 0, 8, 0))
-        wrap.pack(fill="both", expand=True)
+        prev = ttk.LabelFrame(parent, text="Preview", padding=4)
+        prev.pack(fill="x", pady=(8, 0))
+        self.preview = tk.Canvas(
+            prev, width=240, height=150, bg="#151515", highlightthickness=0
+        )
+        self.preview.pack()
+        self.preview_info = ttk.Label(prev, text="No region selected", wraplength=240)
+        self.preview_info.pack(anchor="w", pady=(4, 0))
 
+    def _build_output(self, parent):
         self.text = tk.Text(
-            wrap, wrap="word", font=("TkFixedFont", 11),
+            parent, wrap="word", font=("TkFixedFont", 11),
             bg="#1e1e1e", fg="#e8e8e8", insertbackground="#e8e8e8",
             relief="flat", padx=10, pady=8, state="disabled",
         )
-        scroll = ttk.Scrollbar(wrap, command=self.text.yview)
+        scroll = ttk.Scrollbar(parent, command=self.text.yview)
         self.text.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self.text.pack(side="left", fill="both", expand=True)
 
         self.text.tag_configure("stamp", foreground="#6f9dd6", spacing1=8)
         self.text.tag_configure("error", foreground="#e06c75")
-
-        self.status = ttk.Label(
-            self.root, text="Loading OCR engine...", anchor="w",
-            padding=(10, 4), relief="sunken",
-        )
-        self.status.pack(fill="x", side="bottom")
 
     # -- engine -----------------------------------------------------------
 
@@ -507,6 +265,146 @@ class App:
 
         threading.Thread(target=work, daemon=True).start()
 
+    # -- region list ------------------------------------------------------
+
+    def _selected_index(self):
+        sel = self.region_list.curselection()
+        return sel[0] if sel else None
+
+    def _selected_region(self):
+        i = self._selected_index()
+        return self.reader.regions[i] if i is not None else None
+
+    def _redraw_list(self, keep=None):
+        self.region_list.delete(0, "end")
+        for r in self.reader.regions:
+            mark = "" if r.enabled else "  (off)"
+            self.region_list.insert("end", f"{r.name}{mark}")
+        if keep is not None and 0 <= keep < len(self.reader.regions):
+            self.region_list.selection_set(keep)
+            self.region_list.activate(keep)
+        self._update_preview_info()
+
+    def _add_region(self):
+        target = self.target_box.get().strip() or SCREEN_TARGET
+        self._counter += 1
+        region = Region(f"Region {self._counter}")
+
+        if target != SCREEN_TARGET:
+            try:
+                region.attach_window(target)
+            except WindowNotAvailable as e:
+                self._status(str(e))
+                return
+
+        area = self._drag_select()
+        if area is None:
+            self._status("Cancelled")
+            return
+
+        try:
+            region.set_area(area, self.scale_with_window.get())
+        except WindowNotAvailable as e:
+            self._status(f"Could not anchor region - {e}")
+            return
+
+        self.reader.regions.append(region)
+        self._redraw_list(keep=len(self.reader.regions) - 1)
+        self._status(f"Added {region.name}: {region.describe()}")
+        self._request_preview()
+
+    def _reselect_region(self):
+        region = self._selected_region()
+        if region is None:
+            self._status("Select a region first")
+            return
+        area = self._drag_select()
+        if area is None:
+            return
+        try:
+            region.set_area(area, self.scale_with_window.get())
+        except WindowNotAvailable as e:
+            self._status(f"Could not anchor region - {e}")
+            return
+        self._status(f"{region.name}: {region.describe()}")
+        self._request_preview()
+
+    def _drag_select(self):
+        """Hide the app, let the user drag, restore. Returns a dict or None."""
+        was_running = self.reader.running.is_set()
+        self.reader.running.clear()
+        self.root.withdraw()  # keep our own window out of the capture
+        self.root.update()
+        time.sleep(0.2)
+
+        area = RegionSelector(self.root).select()
+
+        self.root.deiconify()
+        if was_running:
+            self.reader.running.set()
+        return area
+
+    def _delete_region(self):
+        i = self._selected_index()
+        if i is None:
+            self._status("Select a region first")
+            return
+        name = self.reader.regions.pop(i).name
+        self._redraw_list(keep=min(i, len(self.reader.regions) - 1))
+        self._status(f"Deleted {name}")
+
+    def _move(self, delta):
+        i = self._selected_index()
+        if i is None:
+            return
+        j = i + delta
+        if not (0 <= j < len(self.reader.regions)):
+            return
+        regions = self.reader.regions
+        regions[i], regions[j] = regions[j], regions[i]
+        self._redraw_list(keep=j)
+
+    def _rename_region(self):
+        region = self._selected_region()
+        if region is None:
+            return
+        name = simpledialog.askstring(
+            "Rename region", "Name:", initialvalue=region.name, parent=self.root
+        )
+        if name and name.strip():
+            region.name = name.strip()
+            self._redraw_list(keep=self._selected_index())
+
+    def _on_select_region(self, _event=None):
+        self._update_preview_info()
+        self._request_preview()
+
+    def _update_preview_info(self):
+        region = self._selected_region()
+        if region is None:
+            self.preview_info.config(text="No region selected")
+        else:
+            self.preview_info.config(text=f"{region.name}\n{region.describe()}")
+
+    def _request_preview(self):
+        region = self._selected_region()
+        if region is not None:
+            self.reader.preview_request = region
+
+    def _show_preview(self, name, b64png):
+        region = self._selected_region()
+        if region is None or region.name != name:
+            return  # a different region's frame arrived; ignore it
+        try:
+            img = tk.PhotoImage(data=b64png)
+        except tk.TclError:
+            return
+        self._preview_img = img  # hold a reference or Tk garbage-collects it
+        self.preview.delete("all")
+        cw = int(self.preview["width"])
+        ch = int(self.preview["height"])
+        self.preview.create_image(cw // 2, ch // 2, image=img)
+
     # -- queue drain ------------------------------------------------------
 
     def _drain_queue(self):
@@ -516,17 +414,16 @@ class App:
                 kind, payload = self.queue.get_nowait()
 
                 if kind == "text":
-                    self._append(payload)
+                    name, body = payload
+                    self._append(body, source=name)
+                elif kind == "preview":
+                    self._show_preview(*payload)
                 elif kind == "status":
                     self._status(payload)
                 elif kind == "ready":
                     self.toggle_btn.config(state="normal")
                     self.reader.start()
                     self._status(f"Ready - {payload}")
-                elif kind == "error":
-                    self._append(payload, error=True)
-                    self._status(payload)
-                    self.toggle_btn.config(text="Start")
                 elif kind == "fatal":
                     self._append(payload, error=True)
                     self._status("No OCR backend installed")
@@ -537,11 +434,14 @@ class App:
 
     # -- text pane --------------------------------------------------------
 
-    def _append(self, body, error=False):
+    def _append(self, body, source=None, error=False):
         at_bottom = self.text.yview()[1] > 0.99
+        label = f"{time.strftime('%H:%M:%S')}"
+        if source:
+            label += f"  {source}"
 
         self.text.config(state="normal")
-        self.text.insert("end", f"\n{time.strftime('%H:%M:%S')}\n", "stamp")
+        self.text.insert("end", f"\n{label}\n", "stamp")
         self.text.insert("end", body + "\n", "error" if error else "")
         self.text.config(state="disabled")
 
@@ -567,12 +467,19 @@ class App:
             self.reader.running.clear()
             self.toggle_btn.config(text="Start")
             self._status("Paused")
-        else:
-            self.reader.reset()
-            self.reader.running.set()
-            self.toggle_btn.config(text="Stop")
-            scope = "region" if self.reader.region else "full screen"
-            self._status(f"Capturing {scope} every {self.reader.interval}s")
+            return
+
+        if not self.reader.regions:
+            self._status("Add at least one region first")
+            return
+
+        self.reader.reset()
+        self.reader.running.set()
+        self.toggle_btn.config(text="Stop")
+        n = len(self.reader.regions)
+        self._status(
+            f"Capturing {n} region{'s' if n != 1 else ''} every {self.reader.interval}s"
+        )
 
     def _set_interval(self):
         try:
@@ -585,86 +492,15 @@ class App:
         self.reader.new_lines_only = self.new_only.get()
         self.reader.reset()
 
-    def _pick_region(self):
-        was_running = self.reader.running.is_set()
-        self.reader.running.clear()
-        self.root.withdraw()  # keep our own window out of the capture
-        self.root.update()
-        time.sleep(0.2)
-
-        region = RegionSelector(self.root).select()
-
-        self.root.deiconify()
-        if region:
-            self._apply_region(region)
-        if was_running:
-            self.reader.running.set()
-
-    def _apply_region(self, region):
-        size = f"{region['width']}x{region['height']}"
-
-        if self.reader.tracker.attached:
-            try:
-                box = self.reader.tracker.box()
-            except WindowNotAvailable as e:
-                self._status(f"Could not anchor region - {e}")
-                return
-            mode = "proportional" if self.scale_with_window.get() else "anchored"
-            self.reader.rel_region = RelativeRegion(box, region, mode=mode)
-            self.reader.region = None
-            self._status(f"Region {size} anchored to {self.reader.tracker.title!r}")
-        else:
-            self.reader.region = region
-            self.reader.rel_region = None
-            self._status(
-                f"Region set: {size} at {region['left']},{region['top']}"
-            )
-
-        self.reader.reset()
-
-    def _clear_region(self):
-        self.reader.region = None
-        self.reader.rel_region = None
-        self.reader.reset()
-        if self.reader.tracker.attached:
-            self._status(f"Capturing all of {self.reader.tracker.title!r}")
-        else:
-            self._status("Capturing full screen")
-
-    # -- window attachment ------------------------------------------------
-
     def _refresh_windows(self):
-        titles = WindowTracker.list_titles()
-        self.window_box["values"] = titles
-        if titles and not self.window_box.get():
-            self.window_box.current(0)
-        self._status(f"Found {len(titles)} windows")
-
-    def _toggle_attach(self):
-        if self.reader.tracker.attached:
-            self.reader.tracker.detach()
-            self.reader.rel_region = None
-            self.reader.reset()
-            self.attach_btn.config(text="Attach")
-            self._status("Detached - capturing the screen directly")
-            return
-
-        title = self.window_box.get().strip()
-        if not title:
-            self._status("Pick a window first")
-            return
-
-        try:
-            left, top, width, height = self.reader.tracker.attach(title)
-        except WindowNotAvailable as e:
-            self._status(str(e))
-            return
-
-        self.reader.region = None
-        self.reader.rel_region = None
-        self.reader.reset()
-        self.attach_btn.config(text="Detach")
-        self._status(f"Attached to {title!r} ({width}x{height}) - whole window")
+        titles = [SCREEN_TARGET]
+        if WindowTracker.available():
+            titles += WindowTracker.list_titles()
+        self.target_box["values"] = titles
+        if not self.target_box.get():
+            self.target_box.current(0)
+        if len(titles) == 1:
+            self._status("pywinctl not installed - screen regions only")
 
     def _set_on_top(self):
         self.root.attributes("-topmost", self.on_top.get())

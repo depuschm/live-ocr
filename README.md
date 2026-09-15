@@ -2,7 +2,7 @@
 
 Cross-platform screen OCR that continuously reads on-screen text into a desktop window.
 
-Define one or more capture regions, anchor them to application windows, and watch the text in them stream into a labelled log. Regions follow their window as it moves and resizes, save between runs, and group into named profiles for different projects.
+Define one or more capture regions, anchor them to application windows, and watch the text in them stream into a labelled log. Regions follow their window as it moves and resizes, save between runs, and group into named profiles for different projects. Captures can be streamed to a file or a webhook for another service to consume.
 
 ## Why
 
@@ -77,7 +77,7 @@ Each profile holds its own regions and settings, so you can keep one set up for 
 | **Delete** | Asks first. You can't delete the last remaining profile. |
 | **Open folder** | Reveal `~/.live-ocr/` in your file manager. Saves first, so what you see is current. |
 
-Profiles live in `~/.live-ocr/profiles/`, one JSON file each — `Build logs` becomes `build-logs.json`. One file per profile means you can copy one to another machine, commit one into a project repo, or delete it by hand without disturbing the others. `~/.live-ocr/state.json` remembers which was last open.
+Profiles live in `~/.live-ocr/profiles/`, one JSON file each — `Build logs` becomes `build-logs.json`. One file per profile means you can copy one to another machine, commit one into a project repo, or delete it by hand without disturbing the others. `~/.live-ocr/state.json` remembers which was last open, plus the window size.
 
 Everything is written after each change rather than on exit, so a crash won't lose your setup, and writes are atomic — a temporary file replaced into place — so an interruption can't leave a truncated file. Switching profiles saves the current one first.
 
@@ -104,6 +104,7 @@ From there, shrinking the region is the most reliable fix. Turning **Enhance ima
 | **Always on top** | Keeps the window visible while you work in another app. |
 | **Auto-scroll** | Follows new output. Turn it off to read back without being yanked to the bottom. |
 | **Copy all** | Everything in the log to the clipboard. |
+| **Outputs...** | Configure the JSONL file and webhook sinks for this profile. |
 
 ### What happens when a window resizes
 
@@ -114,6 +115,48 @@ Two reasonable answers, so it's an explicit choice rather than a guess. Set **Sc
 **On.** The region grows and shrinks proportionally. Use this when content genuinely reflows with size, like a full-width document body.
 
 If a region's window is minimised or closed, that region pauses and the status bar says what it's waiting for, then resumes when the window returns. It won't fall back to reading whatever moved into those coordinates. Other regions keep running.
+
+## Sending captures somewhere else
+
+Captured lines can be handed to another service. Open **Outputs...** to configure two independent sinks, saved per profile.
+
+**JSON Lines file.** One JSON object per line, appended as text is captured. This is the one to start with: it survives your consumer being offline, can be replayed, and is readable with `tail -f`. Defaults to `~/.live-ocr/captures/<profile>.jsonl` and rotates at 5 MB, keeping one previous file as `.1`.
+
+**Webhook.** The same object POSTed to an HTTP endpoint. Live push rather than pull, and `http://localhost:...` works fine — nothing leaves your machine. Events are lost while the endpoint is down, which is why the file is the durable record. **Test** sends a sample event so you can confirm the endpoint before relying on it.
+
+Webhooks are throttled per region by a configurable cooldown, because a line that stays on screen would otherwise fire on every capture cycle. The file sink is not throttled.
+
+Delivery runs on its own thread behind a queue, so a slow or dead consumer never stalls OCR. Failures appear in the status bar and are dropped rather than retried.
+
+### Event format
+
+One event per captured line:
+
+```json
+{
+  "v": 1,
+  "ts": "2026-09-15T02:19:55+00:00",
+  "profile": "Default",
+  "region": "Build log",
+  "text": "error: connection refused"
+}
+```
+
+`v` is the schema version — check it if you care about forward compatibility.
+
+### Building a connector
+
+`examples/consumer.py` is a working reference for both transports, standard library only. Replace its `handle()` function with whatever your connector should do.
+
+```bash
+# follow the file (survives restarts on either side)
+python examples/consumer.py tail ~/.live-ocr/captures/default.jsonl
+
+# or receive webhook POSTs
+python examples/consumer.py serve 8000
+```
+
+The tailer skips existing history by default (`--from-start` to replay), follows rotation by watching the file's identity rather than its size, and retries a partially-written final line instead of dropping it. Worth copying those details if you write your own — they're the parts that bite later.
 
 ## Performance
 
@@ -139,6 +182,8 @@ Capture and OCR run on a worker thread that never touches a widget — results r
 | `capture.py` | Regions, preprocessing, OCR backends, capture worker |
 | `window_track.py` | Window bounds tracking and window-relative geometry |
 | `config.py` | Profiles: saving and loading regions and settings |
+| `sinks.py` | Event dispatch to the file and webhook sinks |
+| `examples/consumer.py` | Reference consumer — copy this to build a connector |
 
 ## Known limitations
 
@@ -146,7 +191,7 @@ Capture and OCR run on a worker thread that never touches a widget — results r
 - Window bounds include the title bar and borders, so a region pinned near the top edge can shift if the title bar height changes.
 - Text over busy backgrounds (video, gradients) is unreliable.
 - The interval is a floor, not a guarantee — a pass over several large regions can take longer than the interval itself.
-- Line dedupe is exact-match, so a line the OCR reads slightly differently between frames will be reported twice.
+- Line dedupe is exact-match, so a line the OCR reads slightly differently between frames will be reported twice — and sent downstream twice. The webhook cooldown limits the damage; the file sink records both.
 - Saved window regions match on exact window title, so apps that change their title bar (an editor showing the open filename) won't reattach.
 
 ## Requirements

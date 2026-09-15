@@ -14,13 +14,16 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import config
 from capture import OCREngine, Region, ScreenReader
+from sinks import EventBus, JsonlSink, WebhookSink, make_event
 from window_track import WindowNotAvailable, WindowTracker
 
 SCREEN_TARGET = "Whole screen"
+SINK_KEYS = ["jsonl_enabled", "jsonl_path", "webhook_enabled", "webhook_url", "webhook_cooldown"]
 
 
 # --------------------------------------------------------------------------
@@ -98,6 +101,140 @@ class RegionSelector:
 # --------------------------------------------------------------------------
 
 
+class OutputsDialog(tk.Toplevel):
+    """
+    Modal editor for the sink configuration.
+
+    Edits a copy and only writes back on Save, so Cancel genuinely cancels.
+    """
+
+    def __init__(self, parent, cfg, default_path):
+        super().__init__(parent)
+        self.title("Outputs")
+        self.resizable(False, False)
+        self.result = None
+        self._test_result = None
+
+        self.file_on = tk.BooleanVar(value=cfg["jsonl_enabled"])
+        self.path = tk.StringVar(value=cfg["jsonl_path"] or str(default_path))
+        self.hook_on = tk.BooleanVar(value=cfg["webhook_enabled"])
+        self.url = tk.StringVar(value=cfg["webhook_url"])
+        self.cooldown = tk.StringVar(value=str(cfg["webhook_cooldown"]))
+
+        body = ttk.Frame(self, padding=12)
+        body.pack(fill="both", expand=True)
+
+        f = ttk.LabelFrame(body, text="JSON Lines file", padding=8)
+        f.pack(fill="x")
+        ttk.Checkbutton(
+            f, text="Append each captured line to a file", variable=self.file_on
+        ).pack(anchor="w")
+        row = ttk.Frame(f)
+        row.pack(fill="x", pady=(6, 0))
+        ttk.Entry(row, textvariable=self.path, width=52).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="Browse", command=self._browse).pack(side="left", padx=(6, 0))
+        ttk.Label(
+            f, foreground="#777", wraplength=440, justify="left",
+            text="Durable and replayable: survives the consumer being offline. "
+                 "Rotates at 5 MB, keeping one previous file.",
+        ).pack(anchor="w", pady=(6, 0))
+
+        w = ttk.LabelFrame(body, text="Webhook", padding=8)
+        w.pack(fill="x", pady=(10, 0))
+        ttk.Checkbutton(
+            w, text="POST each captured line as JSON", variable=self.hook_on
+        ).pack(anchor="w")
+        row2 = ttk.Frame(w)
+        row2.pack(fill="x", pady=(6, 0))
+        ttk.Entry(row2, textvariable=self.url, width=52).pack(side="left", fill="x", expand=True)
+        ttk.Button(row2, text="Test", command=self._test).pack(side="left", padx=(6, 0))
+        row3 = ttk.Frame(w)
+        row3.pack(fill="x", pady=(6, 0))
+        ttk.Label(row3, text="Minimum seconds between posts per region").pack(side="left")
+        ttk.Spinbox(
+            row3, from_=0, to=3600, increment=1, width=6, textvariable=self.cooldown
+        ).pack(side="left", padx=(8, 0))
+
+        self.note = ttk.Label(body, text="", wraplength=440, justify="left")
+        self.note.pack(anchor="w", pady=(10, 0))
+
+        btns = ttk.Frame(body)
+        btns.pack(fill="x", pady=(12, 0))
+        ttk.Button(btns, text="Save", command=self._save).pack(side="right")
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=(0, 6))
+
+        self.transient(parent)
+        self.grab_set()
+        self.bind("<Escape>", lambda e: self.destroy())
+        parent.wait_window(self)
+
+    def _browse(self):
+        chosen = filedialog.asksaveasfilename(
+            parent=self, title="Capture file", defaultextension=".jsonl",
+            initialfile=Path(self.path.get()).name or "captures.jsonl",
+            filetypes=[("JSON Lines", "*.jsonl"), ("All files", "*.*")],
+        )
+        if chosen:
+            self.path.set(chosen)
+
+    def _test(self):
+        url = self.url.get().strip()
+        if not url:
+            self.note.config(text="Enter a URL first.", foreground="#b05")
+            return
+        self.note.config(text="Sending test event...", foreground="")
+        self._test_result = None
+
+        def work():
+            sample = make_event("test", "Test region", "live-ocr test event")
+            try:
+                WebhookSink(url, cooldown=0, timeout=5).deliver(sample)
+                self._test_result = (f"Delivered to {url}", "#2a7")
+            except Exception as e:
+                self._test_result = (f"Failed: {e}", "#b05")
+
+        threading.Thread(target=work, daemon=True).start()
+        self._poll_test()
+
+    def _poll_test(self):
+        """
+        Poll from the UI thread. after() cannot be called from the worker -
+        it registers a Tcl command, which is only safe on the main thread.
+        """
+        if not self.winfo_exists():
+            return
+        if self._test_result is None:
+            self.after(120, self._poll_test)
+            return
+        msg, colour = self._test_result
+        self.note.config(text=msg, foreground=colour)
+
+    def _save(self):
+        try:
+            cooldown = max(0.0, float(self.cooldown.get()))
+        except ValueError:
+            self.note.config(text="Cooldown must be a number.", foreground="#b05")
+            return
+
+        path = self.path.get().strip()
+        if self.file_on.get() and not path:
+            self.note.config(text="Choose a file path.", foreground="#b05")
+            return
+        url = self.url.get().strip()
+        if self.hook_on.get() and not url.lower().startswith(("http://", "https://")):
+            self.note.config(text="URL must start with http:// or https://", foreground="#b05")
+            return
+
+        self.result = {
+            "jsonl_enabled": self.file_on.get(),
+            "jsonl_path": path,
+            "webhook_enabled": self.hook_on.get(),
+            "webhook_url": url,
+            "webhook_cooldown": cooldown,
+        }
+        self.destroy()
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -123,6 +260,12 @@ class App:
         self.reader.new_lines_only = settings["new_lines_only"]
         self.reader.preview_processed = settings["preview_processed"]
 
+        self.sink_cfg = {k: settings[k] for k in SINK_KEYS}
+        self.bus = EventBus(on_error=self._sink_error)
+        self.bus.start()
+        self.reader.bus = self.bus
+        self.reader.profile = self.profile
+
         self._preview_img = None   # keep a reference or Tk drops the image
         self._after_id = None
         self._counter = len(saved_regions)
@@ -134,6 +277,7 @@ class App:
         self._redraw_list(keep=0 if saved_regions else None)
         self._refresh_profiles()
         self._refresh_windows()
+        self._apply_sinks()
         n = len(saved_regions)
         self._status(
             f"Profile {self.profile!r} - {n} region{'s' if n != 1 else ''}"
@@ -221,6 +365,9 @@ class App:
         ).pack(side="left", padx=(10, 0))
 
         ttk.Button(bar, text="Clear log", command=self._clear_text).pack(side="right")
+        ttk.Button(bar, text="Outputs...", command=self._edit_outputs).pack(
+            side="right", padx=(0, 12)
+        )
         ttk.Button(bar, text="Copy all", command=self._copy_all).pack(
             side="right", padx=(0, 6)
         )
@@ -497,6 +644,10 @@ class App:
         self.interval_box.set(str(settings["interval"]))
         self._set_on_top()
 
+        self.sink_cfg = {k: settings[k] for k in SINK_KEYS}
+        self.reader.profile = name
+        self._apply_sinks()
+
         self._counter = len(regions)
         self._redraw_list(keep=0 if regions else None)
         self._refresh_profiles()
@@ -576,6 +727,35 @@ class App:
         self._switch_to(self.profile)
         self._status(f"Deleted profile {gone!r}")
 
+    def _sink_error(self, msg):
+        """Called from the sink thread - hand to the UI through the queue."""
+        self.queue.put(("status", msg))
+
+    def _apply_sinks(self):
+        sinks = []
+        cfg = self.sink_cfg
+        if cfg["jsonl_enabled"] and cfg["jsonl_path"]:
+            sinks.append(JsonlSink(cfg["jsonl_path"]))
+        if cfg["webhook_enabled"] and cfg["webhook_url"]:
+            sinks.append(
+                WebhookSink(cfg["webhook_url"], cooldown=cfg["webhook_cooldown"])
+            )
+        self.bus.set_sinks(sinks)
+        return sinks
+
+    def _edit_outputs(self):
+        dlg = OutputsDialog(
+            self.root, self.sink_cfg, config.default_capture_path(self.profile)
+        )
+        if dlg.result is None:
+            return
+        self.sink_cfg = dlg.result
+        active = self._apply_sinks()
+        self._save()
+        self._status(
+            "Outputs: " + (", ".join(s.describe() for s in active) or "none")
+        )
+
     def _open_folder(self):
         self._save()  # so the current profile is actually on disk to look at
         if config.open_folder():
@@ -591,6 +771,7 @@ class App:
             "scale_with_window": self.scale_with_window.get(),
             "always_on_top": self.on_top.get(),
             "preview_processed": self.preview_processed.get(),
+            **self.sink_cfg,
         }
 
     def _toggle_enabled(self):
@@ -751,6 +932,7 @@ class App:
         self.status.config(text=msg)
 
     def _on_close(self):
+        self.bus.stop()
         config.set_geometry(self.root.geometry())
         self._save()
         self.reader.running.clear()

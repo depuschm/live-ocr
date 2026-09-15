@@ -26,6 +26,7 @@ from capture import Region
 
 CONFIG_DIR = Path.home() / ".live-ocr"
 PROFILE_DIR = CONFIG_DIR / "profiles"
+CAPTURE_DIR = CONFIG_DIR / "captures"
 STATE_PATH = CONFIG_DIR / "state.json"
 
 VERSION = 1
@@ -38,6 +39,11 @@ DEFAULT_SETTINGS = {
     "scale_with_window": False,
     "always_on_top": False,
     "preview_processed": False,
+    "jsonl_enabled": False,
+    "jsonl_path": "",
+    "webhook_enabled": False,
+    "webhook_url": "",
+    "webhook_cooldown": 10.0,
 }
 
 
@@ -54,6 +60,11 @@ def slug(name):
 
 def path_for(name):
     return PROFILE_DIR / f"{slug(name)}.json"
+
+
+def default_capture_path(name):
+    """Where a profile's JSONL lands unless the user picks somewhere else."""
+    return CAPTURE_DIR / f"{slug(name)}.jsonl"
 
 
 def _write_json(path, payload):

@@ -193,9 +193,20 @@ def exists(name):
 # --------------------------------------------------------------------------
 
 
+def get_state():
+    """Whole UI state blob: active profile, window geometry."""
+    return _read_json(STATE_PATH) or {}
+
+
+def set_state(**values):
+    """Merge into state.json, so one key cannot clobber the others."""
+    data = get_state()
+    data.update(values)
+    return _write_json(STATE_PATH, data)
+
+
 def get_active():
-    data = _read_json(STATE_PATH) or {}
-    name = data.get("active")
+    name = get_state().get("active")
     if name and exists(name):
         return name
     known = list_profiles()
@@ -203,4 +214,17 @@ def get_active():
 
 
 def set_active(name):
-    return _write_json(STATE_PATH, {"active": name})
+    return set_state(active=name)
+
+
+def get_geometry():
+    geo = get_state().get("geometry")
+    # Only accept WxH or WxH+X+Y, so a hand-edited file cannot wedge the app
+    # into an unusable size.
+    if isinstance(geo, str) and re.fullmatch(r"\d+x\d+([+-]-?\d+[+-]-?\d+)?", geo):
+        return geo
+    return None
+
+
+def set_geometry(geo):
+    return set_state(geometry=geo)

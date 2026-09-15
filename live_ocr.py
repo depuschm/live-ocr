@@ -102,8 +102,7 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("live-ocr")
-        root.geometry("980x620")
-        root.minsize(760, 440)
+        root.minsize(840, 600)
 
         self.queue = queue.Queue()
         self.ocr = OCREngine()
@@ -130,6 +129,7 @@ class App:
         self._counter = len(saved_regions)
 
         self._build_widgets()
+        self._restore_geometry()
         self.interval_box.set(str(settings["interval"]))
         self._set_on_top()
         self._redraw_list(keep=0 if saved_regions else None)
@@ -233,7 +233,7 @@ class App:
         ttk.Label(parent, text="Regions").pack(anchor="w")
 
         self.region_list = tk.Listbox(
-            parent, width=30, height=10, exportselection=False,
+            parent, width=30, height=6, exportselection=False,
             activestyle="none", bg="#252525", fg="#e8e8e8",
             selectbackground="#3a6ea5", highlightthickness=0, relief="flat",
         )
@@ -434,6 +434,23 @@ class App:
             region.name = name.strip()
             self._redraw_list(keep=self._selected_index())
             self._save()
+
+    def _restore_geometry(self):
+        """
+        Reuse the last window size, or pick a default that fits the whole
+        left panel - clamped to the screen so it still works on a laptop.
+        """
+        saved = config.get_geometry()
+        if saved:
+            try:
+                self.root.geometry(saved)
+                return
+            except tk.TclError:
+                pass
+
+        w = min(1060, self.root.winfo_screenwidth() - 80)
+        h = min(780, self.root.winfo_screenheight() - 120)
+        self.root.geometry(f"{max(840, w)}x{max(600, h)}")
 
     # -- profiles ---------------------------------------------------------
 
@@ -722,6 +739,7 @@ class App:
         self.status.config(text=msg)
 
     def _on_close(self):
+        config.set_geometry(self.root.geometry())
         self._save()
         self.reader.running.clear()
         self.reader.alive.clear()

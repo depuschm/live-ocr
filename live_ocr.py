@@ -184,6 +184,9 @@ class App:
         ttk.Button(bar, text="Delete", command=self._delete_profile).pack(
             side="left", padx=(3, 0)
         )
+        ttk.Button(bar, text="Open folder", command=self._open_folder).pack(
+            side="right"
+        )
 
         ttk.Separator(self.root, orient="horizontal").pack(fill="x", pady=(8, 0))
 
@@ -534,6 +537,13 @@ class App:
         self.profile = remaining[0]
         self._switch_to(self.profile)
         self._status(f"Deleted profile {gone!r}")
+
+    def _open_folder(self):
+        self._save()  # so the current profile is actually on disk to look at
+        if config.open_folder():
+            self._status(f"Opened {config.CONFIG_DIR}")
+        else:
+            self._status(f"Could not open {config.CONFIG_DIR}")
 
     def _settings(self):
         return {

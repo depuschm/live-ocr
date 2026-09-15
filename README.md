@@ -74,6 +74,7 @@ Each profile holds its own regions and settings, so you can keep one set up for 
 | **Duplicate** | Copy the current regions and settings under a new name. |
 | **Rename** | Refused if the name is already taken. |
 | **Delete** | Asks first. You can't delete the last remaining profile. |
+| **Open folder** | Reveal `~/.live-ocr/` in your file manager. Saves first, so what you see is current. |
 
 Profiles live in `~/.live-ocr/profiles/`, one JSON file each — `Build logs` becomes `build-logs.json`. One file per profile means you can copy one to another machine, commit one into a project repo, or delete it by hand without disturbing the others. `~/.live-ocr/state.json` remembers which was last open.
 

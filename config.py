@@ -17,6 +17,8 @@ Nothing here raises on a bad file: a missing or corrupt profile loads empty.
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -78,6 +80,26 @@ def _read_json(path):
         return data if isinstance(data, dict) else None
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
+
+
+def open_folder():
+    """
+    Show the config directory in the OS file manager.
+
+    Uses Popen rather than run so a slow file manager cannot block the UI
+    thread. Returns False if the platform command is missing.
+    """
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)  # may not exist yet
+        if sys.platform == "win32":
+            os.startfile(CONFIG_DIR)  # noqa: S606 - Windows only
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(CONFIG_DIR)])
+        else:
+            subprocess.Popen(["xdg-open", str(CONFIG_DIR)])
+    except (OSError, AttributeError):
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------

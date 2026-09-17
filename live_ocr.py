@@ -315,11 +315,12 @@ class App:
         panes.add(right, weight=1)
         self._build_output(right)
 
-        self.status = ttk.Label(
-            self.root, text="Loading OCR engine...", anchor="w",
-            padding=(10, 4), relief="sunken",
-        )
-        self.status.pack(fill="x", side="bottom")
+        bar = ttk.Frame(self.root, relief="sunken")
+        bar.pack(fill="x", side="bottom")
+        self.pass_info = ttk.Label(bar, text="", anchor="e", padding=(10, 4))
+        self.pass_info.pack(side="right")
+        self.status = ttk.Label(bar, text="Loading OCR engine...", anchor="w", padding=(10, 4))
+        self.status.pack(side="left", fill="x", expand=True)
 
     def _build_profile_bar(self):
         bar = ttk.Frame(self.root, padding=(8, 8, 8, 0))
@@ -423,6 +424,9 @@ class App:
         ttk.Button(btns2, text="On/Off", width=7, command=self._toggle_enabled).pack(
             side="left", padx=(3, 0)
         )
+        ttk.Button(btns2, text="Combine", width=8, command=self._toggle_combine).pack(
+            side="left", padx=(3, 0)
+        )
 
         target = ttk.LabelFrame(parent, text="New region target", padding=6)
         target.pack(fill="x", pady=(8, 0))
@@ -492,11 +496,12 @@ class App:
     def _redraw_list(self, keep=None):
         self.region_list.delete(0, "end")
         for r in self.reader.regions:
-            mark = "" if r.enabled else "  (off)"
+            mark = ("" if r.enabled else "  (off)") + ("" if r.combine else "  (alone)")
             self.region_list.insert("end", f"{r.name}{mark}")
         if keep is not None and 0 <= keep < len(self.reader.regions):
             self.region_list.selection_set(keep)
             self.region_list.activate(keep)
+        self.reader.preview_region = self._selected_region()
         self._update_preview_info()
 
     def _add_region(self):
@@ -801,6 +806,17 @@ class App:
         self._save()
         self._status(f"{region.name}: {'enabled' if region.enabled else 'disabled'}")
 
+    def _toggle_combine(self):
+        region = self._selected_region()
+        if region is None:
+            self._status("Select a region first")
+            return
+        region.combine = not region.combine
+        self._redraw_list(keep=self._selected_index())
+        self._save()
+        how = "combined with other regions" if region.combine else "read on its own"
+        self._status(f"{region.name}: {how}")
+
     def _save(self):
         """Persist the active profile. Silent on success."""
         if not config.save(self.profile, self.reader.regions, self._settings()):
@@ -825,6 +841,7 @@ class App:
 
     def _request_preview(self):
         region = self._selected_region()
+        self.reader.preview_region = region  # kept live while capturing
         if region is not None:
             self.reader.preview_request = region
 
@@ -876,6 +893,9 @@ class App:
                     self._show_preview(*payload)
                 elif kind == "status":
                     self._status(payload)
+                elif kind == "pass":
+                    secs, n = payload
+                    self.pass_info.config(text=f"last pass {secs:.1f} s, {n} read")
                 elif kind == "reply":
                     self._append(payload["message"], source=f"<- {payload.get('consumer', 'consumer')}")
                 elif kind == "ready":

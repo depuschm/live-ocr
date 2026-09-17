@@ -57,9 +57,10 @@ Each region is read once per interval and its text appears in the log tagged wit
 | **Up / Down** | Reorder. Regions are scanned in list order. |
 | **Rename** | Give it a meaningful name — this is what labels its output. Double-clicking works too. |
 | **Reselect area** | Redraw the box without recreating the region. |
-| **Preview** | Live thumbnail of what the selected region is capturing. Updates while running; selecting a region while stopped grabs a fresh frame. |
+| **Preview** | Live thumbnail of what the selected region is capturing. Updates several times a second while running, independent of how long OCR takes; selecting a region while stopped grabs a fresh frame. |
 | **Show what OCR sees** | Switch the preview from raw pixels to the preprocessed frame. |
 | **On/Off** | Skip a region without deleting it. Disabled regions show `(off)` and cost nothing. |
+| **Combine** | Read the region together with other regions in one OCR call (the default), or on its own. Turn it off for regions holding a single character, which are easily missed when combined. Regions read on their own show `(alone)`. |
 
 Each region has its own target, so you can mix freely — one following your editor, another pinned to a fixed corner of the screen.
 
@@ -173,7 +174,9 @@ A webhook consumer may answer with a JSON object containing `message` (and optio
 
 ## Performance
 
-OCR cost scales linearly with region count — four regions at `1.0` means four OCR passes per second. If it can't keep up, raise the interval or delete regions you aren't reading. Unchanged regions are skipped before reaching OCR, so idle areas are nearly free.
+Starting an OCR run costs more than reading a small region, so regions are combined by default: every changed region with **Combine** on is packed into one image and read in a single OCR call. Measured on a window with 30 regions, 13 of them read on their own, a full pass went from 10.2 s to 3.5 s. Regions with Combine off each cost a run of their own, so keep it off only where needed. Unchanged regions are skipped before reaching OCR, so idle areas are nearly free.
+
+The status bar shows how long the last pass took and how many regions it read. If it can't keep up, raise the interval or delete regions you aren't reading.
 
 Keeping regions small is the single biggest win for both speed and accuracy. OCR over a full 4K desktop is slow and picks up menu bars, tab titles, and dock icons you don't want.
 
@@ -182,8 +185,9 @@ Keeping regions small is the single biggest win for both speed and accuracy. OCR
 1. `mss` grabs each region's area. For window-anchored regions that area is recomputed from the window's live bounds every cycle.
 2. A hash of a downsampled copy is compared to that region's previous frame. If nothing changed it's discarded before reaching OCR, which keeps a static screen from burning CPU.
 3. Surviving frames are converted to grayscale, contrast-stretched on the 2nd/98th percentiles, auto-inverted if light-on-dark, and upscaled 2x. OCR models are trained on dark text over light backgrounds at document-scale sizes, and screen text breaks all three assumptions.
-4. Results below a confidence threshold (default `0.5`) are dropped.
-5. Lines are checked against the last 400 that region has seen, and only new ones are displayed.
+4. Changed regions with Combine on are packed side by side into one image (several if they don't fit in 2000 px), read in one call, and each line of text is assigned back to the region it lies in. Regions with Combine off are read one by one. With Tesseract, every region is read on its own.
+5. Results below a confidence threshold (default `0.5`) are dropped.
+6. Lines are checked against the last 400 that region has seen, and only new ones are displayed.
 
 Capture and OCR run on a worker thread that never touches a widget — results reach the UI over a queue, since tkinter isn't thread-safe. Preview thumbnails are encoded as base64 PNG, which Tk reads natively, avoiding a Pillow dependency.
 

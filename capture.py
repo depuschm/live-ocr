@@ -136,6 +136,7 @@ class Region:
         self.mode = mode                 # "screen" or "window"
         self.window_title = window_title
         self.enabled = True
+        self.combine = True              # read in one OCR call with other regions
 
         self.abs_region = None           # dict, used in screen mode
         self.rel = None                  # RelativeRegion, used in window mode
@@ -209,6 +210,7 @@ class Region:
             "mode": self.mode,
             "window_title": self.window_title,
             "enabled": self.enabled,
+            "combine": self.combine,
             "abs_region": self.abs_region,
             "rel": self.rel.to_dict() if self.rel is not None else None,
         }
@@ -226,6 +228,7 @@ class Region:
             window_title=d.get("window_title"),
         )
         region.enabled = bool(d.get("enabled", True))
+        region.combine = bool(d.get("combine", True))
         region.abs_region = d.get("abs_region")
         rel = d.get("rel")
         region.rel = RelativeRegion.from_dict(rel) if rel else None
@@ -309,44 +312,105 @@ class OCREngine:
             "  pip install pytesseract            (also needs the tesseract binary)"
         )
 
+    # RapidOCR shrinks inputs whose longer side exceeds this, which would
+    # blur small text, so combined images are kept within it.
+    MOSAIC_MAX_SIDE = 2000
+
     def read(self, img):
         if self.backend == "RapidOCR":
-            return self._read_rapidocr(img)
+            return "\n".join(text for _, text in self._rapidocr_rows(img))
         return self._read_tesseract(img)
 
-    def _read_rapidocr(self, img):
+    def read_many(self, images):
+        """
+        {name: image} -> {name: text}, in as few engine calls as possible.
+
+        Starting the engine dominates the cost for small regions, so RapidOCR
+        gets the images packed side by side into one picture (several, if they
+        don't fit), and each line of text found goes back to the image it lies
+        in. Preprocessed images carry a white margin, which keeps text from
+        neighbouring images apart.
+        """
+        if self.backend != "RapidOCR":
+            return {name: self.read(img) for name, img in images.items()}
+
+        texts = {name: [] for name in images}
+        alone = {n: i for n, i in images.items() if max(i.shape[:2]) > self.MOSAIC_MAX_SIDE}
+        for name, img in alone.items():
+            texts[name].append(self.read(img))
+
+        packable = {n: i for n, i in images.items() if n not in alone}
+        width = min(self.MOSAIC_MAX_SIDE, max([1400] + [i.shape[1] for i in packable.values()]))
+        for canvas, place in _mosaics(packable, width, self.MOSAIC_MAX_SIDE):
+            for box, text in self._rapidocr_rows(canvas):
+                cx = sum(p[0] for p in box) / len(box)
+                cy = sum(p[1] for p in box) / len(box)
+                for name, (x, y, w, h) in place.items():
+                    if x <= cx < x + w and y <= cy < y + h:
+                        texts[name].append(text)
+                        break
+        return {name: "\n".join(lines) for name, lines in texts.items()}
+
+    def _rapidocr_rows(self, img):
+        """[(box, text)] above the confidence threshold, in reading order."""
         raw = self._engine(img)
 
         # RapidOCR's return shape has changed across versions, so normalise
         # rather than assuming one layout.
-        if raw is None:
-            return ""
         if isinstance(raw, tuple):
             raw = raw[0]
         if raw is None:
-            return ""
+            return []
 
         if hasattr(raw, "txts"):  # newer object-style result
             texts = raw.txts or []
             scores = getattr(raw, "scores", None) or [1.0] * len(texts)
-            return "\n".join(
-                t for t, s in zip(texts, scores) if s >= self.min_confidence
-            )
+            boxes = getattr(raw, "boxes", None)
+            boxes = [[(0, 0)] * 4] * len(texts) if boxes is None else boxes
+            return [
+                (b, t) for b, t, s in zip(boxes, texts, scores) if s >= self.min_confidence
+            ]
 
-        lines = []
+        rows = []
         for item in raw:  # classic [box, text, confidence] rows
             try:
-                text, conf = item[1], float(item[2])
+                box, text, conf = item[0], item[1], float(item[2])
             except (IndexError, TypeError, ValueError):
                 continue
             if conf >= self.min_confidence:
-                lines.append(text)
-        return "\n".join(lines)
+                rows.append((box, text))
+        return rows
 
     def _read_tesseract(self, img):
         from PIL import Image
 
         return self._engine.image_to_string(Image.fromarray(img)).strip()
+
+
+def _mosaics(images, width, max_height):
+    """
+    Shelf-pack {name: image} into white canvases no taller than max_height.
+    Yields (canvas, {name: (x, y, w, h)}). Tallest first packs tightest.
+    """
+    place, x, y, shelf = {}, 0, 0, 0
+
+    def flush():
+        canvas = np.full((y + shelf, width, 3), 255, np.uint8)
+        for name, (px, py, w, h) in place.items():
+            canvas[py:py + h, px:px + w] = images[name]
+        return canvas, dict(place)
+
+    for name in sorted(images, key=lambda n: -images[n].shape[0]):
+        h, w = images[name].shape[:2]
+        if x + w > width:
+            x, y, shelf = 0, y + shelf, 0
+        if place and y + h > max_height:
+            yield flush()
+            place, x, y, shelf = {}, 0, 0, 0
+        place[name] = (x, y, w, h)
+        x, shelf = x + w, max(shelf, h)
+    if place:
+        yield flush()
 
 
 # --------------------------------------------------------------------------
@@ -381,6 +445,7 @@ class ScreenReader(threading.Thread):
 
         self.regions = []                 # list[Region], order matters
         self.preview_request = None       # Region awaiting a preview grab
+        self.preview_region = None        # selected Region, previewed live
 
         self.bus = None                   # optional EventBus
         self.profile = ""                 # stamped onto published events
@@ -396,6 +461,8 @@ class ScreenReader(threading.Thread):
     def run(self):
         import mss
 
+        threading.Thread(target=self._preview_loop, daemon=True).start()
+
         # mss instances are not safe to share across threads, so this is
         # created here in the worker rather than in __init__.
         with mss.mss() as sct:
@@ -408,18 +475,60 @@ class ScreenReader(threading.Thread):
                     time.sleep(0.15)      # still responsive to preview requests
                     continue
 
-                for region in list(self.regions):  # snapshot; UI may reorder
-                    if not self.alive.is_set() or not self.running.is_set():
-                        break
-                    if region.enabled:
-                        self._scan(sct, region)
-
+                self._pass(sct)
                 self._publish_snapshot()
                 time.sleep(self.interval)
+
+    def _pass(self, sct):
+        """Read every enabled region once: combined regions in one OCR call."""
+        started = time.monotonic()
+        combined = {}
+        read = 0
+        for region in list(self.regions):  # snapshot; UI may reorder
+            if not self.alive.is_set() or not self.running.is_set():
+                return
+            if not region.enabled:
+                continue
+            prepared = self._prepare(sct, region)
+            if prepared is None:
+                continue
+            read += 1
+            if region.combine:
+                combined[region] = prepared
+            else:
+                self._ocr_one(region, prepared)
+
+        if combined:
+            try:
+                texts = self.ocr.read_many({r.name: img for r, img in combined.items()})
+            except Exception as e:
+                for region in combined:
+                    self._status(region.name, f"{region.name}: OCR failed - {e}")
+            else:
+                for region in combined:
+                    self._finish(region, texts.get(region.name, ""))
+
+        if read:
+            self.out.put(("pass", (time.monotonic() - started, read)))
 
     # -- per-region work --------------------------------------------------
 
     def _scan(self, sct, region):
+        """Read one region on its own."""
+        prepared = self._prepare(sct, region)
+        if prepared is not None:
+            self._ocr_one(region, prepared)
+
+    def _ocr_one(self, region, prepared):
+        try:
+            text = self.ocr.read(prepared)
+        except Exception as e:
+            self._status(region.name, f"{region.name}: OCR failed - {e}")
+            return
+        self._finish(region, text)
+
+    def _prepare(self, sct, region):
+        """Grab and preprocess a region; None if there is nothing new to read."""
         try:
             area = region.resolve(sct)
         except WindowNotAvailable as e:
@@ -459,13 +568,9 @@ class ScreenReader(threading.Thread):
         # Preview after preprocessing, so "what OCR sees" is literally true -
         # with enhancement off, prepared is the raw frame and both agree.
         self._send_preview(region, prepared if self.preview_processed else frame)
+        return prepared
 
-        try:
-            text = self.ocr.read(prepared)
-        except Exception as e:
-            self._status(region.name, f"{region.name}: OCR failed - {e}")
-            return
-
+    def _finish(self, region, text):
         self._status(region.name, None)
         if self._texts.get(region.name) != text:
             self._texts[region.name] = text
@@ -525,14 +630,30 @@ class ScreenReader(threading.Thread):
         texts = {n: t for n, t in self._texts.items() if n in live}
         self.bus.publish(make_snapshot(self.profile, texts))
 
+    def _preview_loop(self):
+        """
+        Keep the selected region's preview live while capturing. Runs on its
+        own thread with its own mss instance, so a slow OCR call on the
+        worker never freezes the preview.
+        """
+        import mss
+
+        with mss.mss() as sct:
+            while self.alive.is_set():
+                region = self.preview_region
+                if region is not None and self.running.is_set():
+                    self._do_preview(sct, region)
+                time.sleep(0.2)
+
     def _do_preview(self, sct, region):
         try:
             frame = grab_rgb(sct, region.resolve(sct))
             if self.preview_processed and self.enhance:
                 frame = preprocess(frame)
         except Exception as e:
-            self.out.put(("status", f"{region.name}: preview failed - {e}"))
+            self._status(f"preview:{region.name}", f"{region.name}: preview failed - {e}")
             return
+        self._status(f"preview:{region.name}", None)
         self._send_preview(region, frame)
 
     def _status(self, key, msg):

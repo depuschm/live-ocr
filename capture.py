@@ -7,11 +7,14 @@ display attached.
 """
 
 import base64
+import json
 import struct
 import zlib
 import threading
 import time
 from collections import deque
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 
@@ -84,6 +87,11 @@ def thumbnail(frame, max_w=240, max_h=150):
     h, w = frame.shape[:2]
     step = max(1, int(np.ceil(max(w / max_w, h / max_h))))
     return np.ascontiguousarray(frame[::step, ::step])
+
+
+def write_png(path, rgb):
+    """Save an RGB array as a PNG file, using the same encoder as previews."""
+    Path(path).write_bytes(base64.b64decode(to_png_b64(rgb)))
 
 
 def to_png_b64(rgb):
@@ -446,6 +454,7 @@ class ScreenReader(threading.Thread):
         self.regions = []                 # list[Region], order matters
         self.preview_request = None       # Region awaiting a preview grab
         self.preview_region = None        # selected Region, previewed live
+        self.shot_request = None          # [window title or None] -> save a capture
 
         self.bus = None                   # optional EventBus
         self.profile = ""                 # stamped onto published events
@@ -470,6 +479,10 @@ class ScreenReader(threading.Thread):
                 if self.preview_request is not None:
                     self._do_preview(sct, self.preview_request)
                     self.preview_request = None
+
+                if self.shot_request is not None:
+                    self._save_shot(sct, *self.shot_request)
+                    self.shot_request = None
 
                 if not self.running.is_set():
                     time.sleep(0.15)      # still responsive to preview requests
@@ -629,6 +642,46 @@ class ScreenReader(threading.Thread):
         live = {r.name for r in self.regions if r.enabled}
         texts = {n: t for n, t in self._texts.items() if n in live}
         self.bus.publish(make_snapshot(self.profile, texts))
+
+    def _save_shot(self, sct, window_title, folder):
+        """
+        Save what live-ocr captures: the whole window a region is anchored to
+        (or the full screen for screen regions), plus a JSON note of the
+        window box and every region's area. For checking region alignment and
+        for sending to someone else to look at.
+        """
+        try:
+            if window_title:
+                tracker = WindowTracker()
+                box = tracker.attach(window_title)
+                area = {"left": box[0], "top": box[1], "width": box[2], "height": box[3]}
+            else:
+                mon = sct.monitors[0]
+                area = {k: mon[k] for k in ("left", "top", "width", "height")}
+            frame = grab_rgb(sct, area)
+
+            note = {"window_title": window_title, "window": area, "regions": {}}
+            for region in list(self.regions):
+                try:
+                    r = region.resolve(sct)
+                except Exception as e:
+                    note["regions"][region.name] = {"error": str(e)}
+                    continue
+                note["regions"][region.name] = {
+                    "left": r["left"] - area["left"], "top": r["top"] - area["top"],
+                    "width": r["width"], "height": r["height"], "enabled": region.enabled,
+                }
+
+            folder = Path(folder)
+            folder.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            png = folder / f"shot_{stamp}.png"
+            write_png(png, frame)
+            (folder / f"shot_{stamp}.json").write_text(json.dumps(note, indent=1))
+        except Exception as e:
+            self.out.put(("status", f"Could not save the window shot - {e}"))
+            return
+        self.out.put(("shot", str(png)))
 
     def _preview_loop(self):
         """

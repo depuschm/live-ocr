@@ -297,6 +297,7 @@ class App:
         self._load_engine_async()
         self._after_id = self.root.after(100, self._drain_queue)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.bind("<F9>", lambda e: self._save_shot())
 
     # -- layout -----------------------------------------------------------
 
@@ -377,6 +378,7 @@ class App:
             bar, text="Always on top", variable=self.on_top, command=self._set_on_top
         ).pack(side="left", padx=(10, 0))
 
+        ttk.Button(bar, text="Save shot", command=self._save_shot).pack(side="right", padx=(0, 6))
         ttk.Button(bar, text="Clear log", command=self._clear_text).pack(side="right")
         ttk.Button(bar, text="Outputs...", command=self._edit_outputs).pack(
             side="right", padx=(0, 12)
@@ -839,6 +841,16 @@ class App:
         self._save()
         self._request_preview()  # redraw immediately rather than next cycle
 
+    def _save_shot(self):
+        """
+        Save what live-ocr captures right now: the window a region is anchored
+        to, plus every region's area, for checking alignment. Also on F9.
+        """
+        title = next((r.window_title for r in self.reader.regions
+                      if r.mode == "window" and r.window_title), None)
+        self.reader.shot_request = (title, str(config.CAPTURE_DIR / "shots"))
+        self._status("Saving window shot...")
+
     def _request_preview(self):
         region = self._selected_region()
         self.reader.preview_region = region  # kept live while capturing
@@ -893,6 +905,9 @@ class App:
                     self._show_preview(*payload)
                 elif kind == "status":
                     self._status(payload)
+                elif kind == "shot":
+                    self._status(f"Saved {payload}")
+                    self._append(payload, source="shot")
                 elif kind == "pass":
                     secs, n = payload
                     self.pass_info.config(text=f"last pass {secs:.1f} s, {n} read")

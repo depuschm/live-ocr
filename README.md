@@ -61,6 +61,7 @@ Each region is read once per interval and its text appears in the log tagged wit
 | **Show what OCR sees** | Switch the preview from raw pixels to the preprocessed frame. |
 | **On/Off** | Skip a region without deleting it. Disabled regions show `(off)` and cost nothing. |
 | **Combine** | Read the region together with other regions in one OCR call (the default), or on its own. Turn it off for regions holding a single character, which are easily missed when combined. Regions read on their own show `(alone)`. |
+| **Save shot** | Saves what live-ocr is capturing: a PNG of the whole window the regions are anchored to (or the screen, for screen regions), plus a JSON note of the window box and every region's area within it. Written to `~/.live-ocr/captures/shots/`. Also on **F9**. Useful for checking alignment, or for sending to someone else to look at. |
 
 Each region has its own target, so you can mix freely — one following your editor, another pinned to a fixed corner of the screen.
 

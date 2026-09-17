@@ -844,8 +844,27 @@ class App:
 
     # -- queue drain ------------------------------------------------------
 
+    def _publish_own_windows(self):
+        """
+        Tell the capture thread where live-ocr's windows are. Tk may only be
+        queried from this thread, so the reader gets a fresh list instead.
+        """
+        rects = []
+        for w in [self.root, *self.root.winfo_children()]:
+            if not isinstance(w, (tk.Tk, tk.Toplevel)) or not w.winfo_viewable():
+                continue
+            if w.state() in ("iconic", "withdrawn"):  # some platforms stay "viewable"
+                continue
+            x, y = w.winfo_rootx(), w.winfo_rooty()  # client area
+            fx, fy = w.winfo_x(), w.winfo_y()        # outer frame, incl. title bar
+            border = max(0, x - fx)
+            rects.append((min(x, fx), min(y, fy),
+                          x + w.winfo_width() + border, y + w.winfo_height() + border))
+        self.reader.own_windows = rects
+
     def _drain_queue(self):
         """Runs on the UI thread. The only place widgets get written to."""
+        self._publish_own_windows()
         try:
             while True:
                 kind, payload = self.queue.get_nowait()

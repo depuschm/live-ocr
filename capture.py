@@ -385,6 +385,8 @@ class ScreenReader(threading.Thread):
         self.bus = None                   # optional EventBus
         self.profile = ""                 # stamped onto published events
         self.snapshot_events = False      # one whole-screen event per pass
+        self.own_windows = []             # live-ocr's own window rectangles
+                                          # (left, top, right, bottom), set by the UI
 
         self._texts = {}                  # region name -> latest OCR text
         self._texts_changed = False
@@ -426,11 +428,24 @@ class ScreenReader(threading.Thread):
             self._status(region.name, f"{region.name}: waiting - {e}")
             return
 
+        # Capture reads screen pixels, so live-ocr's own window is read if it
+        # is on top of the area.
+        inside = self._own_windows_inside(area)
+        if inside is None:
+            self._status(region.name, f"{region.name}: waiting - covered by live-ocr's window")
+            return
+
         try:
             frame = grab_rgb(sct, area)
         except Exception as e:
             self._status(region.name, f"{region.name}: capture failed - {e}")
             return
+
+        for x1, y1, x2, y2 in inside:
+            # Blank before the change check, so live-ocr's own log scrolling
+            # does not count as a change in the region.
+            l, t = area["left"], area["top"]
+            frame[y1 - t:y2 - t, x1 - l:x2 - l] = frame.mean(axis=(0, 1))
 
         if not region.frame_changed(frame):
             return
@@ -456,6 +471,25 @@ class ScreenReader(threading.Thread):
             self._texts[region.name] = text
             self._texts_changed = True
         self._emit(region, text)
+
+    def _own_windows_inside(self, area):
+        """
+        live-ocr windows lying wholly inside the area, to blank out, or None
+        if one covers only part of it. A partly covered region can yield cut
+        text ("15.2" for "15.23"), so it waits; a large region such as the
+        whole screen still reads everything around live-ocr.
+        """
+        l, t = area["left"], area["top"]
+        r, b = l + area["width"], t + area["height"]
+        inside = []
+        for x1, y1, x2, y2 in list(self.own_windows):
+            if x2 <= l or x1 >= r or y2 <= t or y1 >= b:
+                continue
+            if x1 >= l and y1 >= t and x2 <= r and y2 <= b:
+                inside.append((x1, y1, x2, y2))
+            else:
+                return None
+        return inside
 
     def _send_preview(self, region, img):
         self.out.put(("preview", (region.name, to_png_b64(thumbnail(img)))))

@@ -200,7 +200,7 @@ Capture and OCR run on a worker thread that never touches a widget — results r
 
 ## Known limitations
 
-- **Occlusion.** Capture reads screen pixels, so another window covering your target will be read instead. Anchoring tracks position, not content.
+- **Occlusion.** Capture reads screen pixels, so another window covering your target will be read instead. Anchoring tracks position, not content. live-ocr's own windows are the exception: a region they partly cover waits, and a region they sit wholly inside (such as the whole screen) is read with live-ocr's area blanked out.
 - Window bounds include the title bar and borders, so a region pinned near the top edge can shift if the title bar height changes.
 - Text over busy backgrounds (video, gradients) is unreliable.
 - The interval is a floor, not a guarantee — a pass over several large regions can take longer than the interval itself.

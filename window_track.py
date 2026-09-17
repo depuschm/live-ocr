@@ -165,7 +165,11 @@ class WindowTracker:
         if not matches:
             raise WindowNotAvailable(f"No window titled {title!r}")
 
-        self._handle = matches[0]
+        # Several windows can share a title (an app's main window and its
+        # child windows). Prefer one that is not minimised, so minimising the
+        # unwanted window is enough to pick the other.
+        visible = [w for w in matches if not getattr(w, "isMinimized", False)]
+        self._handle = (visible or matches)[0]
         self.title = title
         return self.box()
 

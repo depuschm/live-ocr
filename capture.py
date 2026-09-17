@@ -184,7 +184,13 @@ class Region:
                     self.tracker = None
                     raise
 
-            box = self.tracker.box()      # raises WindowNotAvailable
+            try:
+                box = self.tracker.box()
+            except WindowNotAvailable:
+                # Drop the handle so the next cycle looks the title up again,
+                # possibly finding another window with the same title.
+                self.tracker = None
+                raise
             if self.rel is not None:
                 return self.rel.resolve(box)
             left, top, width, height = box

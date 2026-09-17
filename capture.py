@@ -178,8 +178,9 @@ class Region:
                 if not self.window_title:
                     raise WindowNotAvailable(f"{self.name}: no window attached")
                 self.tracker = WindowTracker()
+                like = (self.rel.base_w, self.rel.base_h) if self.rel is not None else None
                 try:
-                    self.tracker.attach(self.window_title)
+                    self.tracker.attach(self.window_title, like=like)
                 except WindowNotAvailable:
                     self.tracker = None
                     raise
@@ -187,8 +188,8 @@ class Region:
             try:
                 box = self.tracker.box()
             except WindowNotAvailable:
-                # Drop the handle so the next cycle looks the title up again,
-                # possibly finding another window with the same title.
+                # Drop the handle so the next cycle looks the window up again,
+                # e.g. a new window replacing one that closed.
                 self.tracker = None
                 raise
             if self.rel is not None:

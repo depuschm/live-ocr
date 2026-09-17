@@ -147,17 +147,28 @@ class WindowTracker:
             return []
         return sorted(titles, key=str.lower)
 
-    def attach(self, title):
+    # How far a window's width/height ratio may differ from the one a region
+    # was drawn on and still count as the same window.
+    ASPECT_TOLERANCE = 0.05
+
+    def attach(self, title, like=None):
+        """
+        Attach to a window by title. A title ending in "*" matches as a prefix,
+        for apps whose title changes as they run (a document name, a counter).
+
+        like is the (width, height) of the window a region was drawn on. An
+        app can have several windows with the same title, so with like set
+        only windows of similar proportions qualify, closest first. If none
+        does, this raises and the region waits instead of reading the wrong
+        window.
+        """
         pwc = _pwc()
         if pwc is None:
             raise WindowNotAvailable("pywinctl is not installed")
         try:
             if title.endswith("*"):
-                # Prefix match, for apps whose title changes as they run
-                # (a document name, a counter). Saved as "Name*".
                 prefix = title[:-1]
-                exact = next((t for t in pwc.getAllTitles() if t.startswith(prefix)), None)
-                matches = pwc.getWindowsWithTitle(exact) if exact else []
+                matches = [w for w in pwc.getAllWindows() if (w.title or "").startswith(prefix)]
             else:
                 matches = pwc.getWindowsWithTitle(title)
         except Exception as e:
@@ -165,11 +176,24 @@ class WindowTracker:
         if not matches:
             raise WindowNotAvailable(f"No window titled {title!r}")
 
-        # Several windows can share a title (an app's main window and its
-        # child windows). Prefer one that is not minimised, so minimising the
-        # unwanted window is enough to pick the other.
-        visible = [w for w in matches if not getattr(w, "isMinimized", False)]
-        self._handle = (visible or matches)[0]
+        if like is not None:
+            want = like[0] / max(1, like[1])
+
+            def mismatch(w):
+                try:
+                    return abs(w.width / max(1, w.height) / want - 1)
+                except Exception:
+                    return float("inf")  # window closed while we looked
+
+            matches = sorted(
+                (w for w in matches if mismatch(w) <= self.ASPECT_TOLERANCE), key=mismatch
+            )
+            if not matches:
+                raise WindowNotAvailable(
+                    f"No window titled {title!r} shaped like {like[0]}x{like[1]}"
+                )
+
+        self._handle = matches[0]
         self.title = title
         return self.box()
 

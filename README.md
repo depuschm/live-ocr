@@ -87,7 +87,7 @@ A corrupt or unreadable profile loads empty rather than crashing, and a single m
 
 Window-anchored regions store the window title and reattach on their own. If the app isn't open when you launch, that region waits and starts working the moment it appears; you don't need to reselect it. Matching is on the exact title, so an app that puts the current filename in its title bar won't match after you switch files. For titles like that, end the saved title with `*` to match it as a prefix: `My Editor*` matches `My Editor - notes.txt`.
 
-If several windows share a title, a region attaches to one that isn't minimised. Minimise the windows you don't want read. Windows that share a title and are all visible can't be told apart, and the region takes whichever the system lists first.
+If several windows share a title, a region only attaches to one with about the same proportions (within 5%) as the window it was drawn on. When none fits, it waits rather than reading the wrong window, and it picks up a matching window as soon as one opens, including a new one replacing a closed window. Windows with the same title and the same proportions can't be told apart.
 
 ### When a region reads badly
 
@@ -206,7 +206,7 @@ Capture and OCR run on a worker thread that never touches a widget — results r
 - The interval is a floor, not a guarantee — a pass over several large regions can take longer than the interval itself.
 - Line dedupe is exact-match, so a line the OCR reads slightly differently between frames will be reported twice — and sent downstream twice. The webhook cooldown limits the damage; the file sink records both.
 - Saved window regions match on the exact title or a `*` prefix. A title that changes in the middle won't reattach.
-- Visible windows with the same title can't be told apart; minimise the ones you don't want read.
+- Windows with the same title and the same proportions can't be told apart; a region takes whichever the system lists first.
 
 ## Requirements
 

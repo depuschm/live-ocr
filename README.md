@@ -158,6 +158,19 @@ python examples/consumer.py serve 8000
 
 The tailer skips existing history by default (`--from-start` to replay), follows rotation by watching the file's identity rather than its size, and retries a partially-written final line instead of dropping it. Worth copying those details if you write your own — they're the parts that bite later.
 
+### Consumers that reply
+
+For consumers that need all regions at once, tick **Send one snapshot of all regions per pass** in **Outputs...**. Instead of one event per line, each pass that changed anything sends every enabled region's latest text together:
+
+```json
+{"v": 1, "type": "snapshot", "ts": "2026-09-15T02:19:55+00:00", "profile": "Default",
+ "regions": {"Status": "Build passed", "Counter": "42"}}
+```
+
+A webhook consumer may answer with a JSON object containing `message` (and optionally `consumer`, used as the log label). live-ocr shows the message in its log. Any other response body is treated as a plain acknowledgement.
+
+A window title ending in `*` matches as a prefix, for apps whose title changes as they run.
+
 ## Performance
 
 OCR cost scales linearly with region count — four regions at `1.0` means four OCR passes per second. If it can't keep up, raise the interval or delete regions you aren't reading. Unchanged regions are skipped before reaching OCR, so idle areas are nearly free.

@@ -44,6 +44,7 @@ DEFAULT_SETTINGS = {
     "webhook_enabled": False,
     "webhook_url": "",
     "webhook_cooldown": 10.0,
+    "snapshot_events": False,
 }
 
 

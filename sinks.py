@@ -38,6 +38,22 @@ def make_event(profile, region, text):
     }
 
 
+def make_snapshot(profile, regions):
+    """
+    Every region's latest text in one event, sent once per pass.
+
+    Line events suit logs. Consumers that interpret a whole screen need all
+    values together, including ones that did not change.
+    """
+    return {
+        "v": SCHEMA_VERSION,
+        "type": "snapshot",
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "profile": profile,
+        "regions": dict(regions),
+    }
+
+
 # --------------------------------------------------------------------------
 # Sinks
 # --------------------------------------------------------------------------
@@ -122,7 +138,14 @@ class WebhookSink:
         )
         # Short timeout: a hung endpoint must not back up the sink queue.
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            resp.read(1)
+            raw = resp.read(65536)
+        # A consumer may answer with a JSON object carrying a "message".
+        # Anything else is treated as a plain acknowledgement.
+        try:
+            reply = json.loads(raw)
+        except ValueError:
+            return None
+        return reply if isinstance(reply, dict) and "message" in reply else None
 
     def close(self):
         pass
@@ -144,10 +167,11 @@ class EventBus(threading.Thread):
     app routes that to the status bar. One failing sink never stops another.
     """
 
-    def __init__(self, on_error=None, max_pending=1000):
+    def __init__(self, on_error=None, on_reply=None, max_pending=1000):
         super().__init__(daemon=True)
         self.queue = queue.Queue(maxsize=max_pending)
         self.on_error = on_error
+        self.on_reply = on_reply  # called with a consumer's reply dict
         self.alive = threading.Event()
         self.alive.set()
 
@@ -192,7 +216,9 @@ class EventBus(threading.Thread):
 
             for sink in sinks:
                 try:
-                    sink.deliver(event)
+                    reply = sink.deliver(event)
+                    if reply and self.on_reply:
+                        self.on_reply(reply)
                 except urllib.error.URLError as e:
                     self._report(f"{sink.describe()}: unreachable ({e.reason})")
                 except Exception as e:

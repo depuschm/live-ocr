@@ -15,7 +15,7 @@ from collections import deque
 
 import numpy as np
 
-from sinks import make_event
+from sinks import make_event, make_snapshot
 from window_track import RelativeRegion, WindowNotAvailable, WindowTracker
 
 
@@ -27,6 +27,7 @@ from window_track import RelativeRegion, WindowNotAvailable, WindowTracker
 # three assumptions, so a little preparation buys a lot of accuracy.
 
 MAX_PIXELS_AFTER_SCALE = 8_000_000
+PAD = 30  # white margin added after scaling
 
 
 def _resize(img, factor):
@@ -64,6 +65,12 @@ def preprocess(frame, scale=2):
             scale = max(1, int((MAX_PIXELS_AFTER_SCALE / img.size) ** 0.5))
         if scale > 1:
             img = _resize(img, scale)
+
+    # Text detectors miss glyphs that touch the frame edge, which is the norm
+    # for tight regions (a single character, a short number). A white margin
+    # fixes it; after the inversion above the background is light, so white
+    # blends in.
+    img = np.pad(img, PAD, constant_values=255)
 
     return np.stack([img] * 3, axis=-1)
 
@@ -370,6 +377,10 @@ class ScreenReader(threading.Thread):
 
         self.bus = None                   # optional EventBus
         self.profile = ""                 # stamped onto published events
+        self.snapshot_events = False      # one whole-screen event per pass
+
+        self._texts = {}                  # region name -> latest OCR text
+        self._texts_changed = False
 
         self._last_status = {}
 
@@ -394,6 +405,7 @@ class ScreenReader(threading.Thread):
                     if region.enabled:
                         self._scan(sct, region)
 
+                self._publish_snapshot()
                 time.sleep(self.interval)
 
     # -- per-region work --------------------------------------------------
@@ -433,6 +445,9 @@ class ScreenReader(threading.Thread):
             return
 
         self._status(region.name, None)
+        if self._texts.get(region.name) != text:
+            self._texts[region.name] = text
+            self._texts_changed = True
         self._emit(region, text)
 
     def _send_preview(self, region, img):
@@ -453,12 +468,21 @@ class ScreenReader(threading.Thread):
 
     def _publish(self, region, lines):
         """One event per line - simpler for a downstream consumer to handle."""
-        if self.bus is None:
+        if self.bus is None or self.snapshot_events:
             return
         for line in lines:
             line = line.strip()
             if line:
                 self.bus.publish(make_event(self.profile, region.name, line))
+
+    def _publish_snapshot(self):
+        """Only when something changed, so a static screen sends nothing."""
+        if self.bus is None or not self.snapshot_events or not self._texts_changed:
+            return
+        self._texts_changed = False
+        live = {r.name for r in self.regions if r.enabled}
+        texts = {n: t for n, t in self._texts.items() if n in live}
+        self.bus.publish(make_snapshot(self.profile, texts))
 
     def _do_preview(self, sct, region):
         try:
@@ -480,5 +504,7 @@ class ScreenReader(threading.Thread):
 
     def reset(self):
         self._last_status.clear()
+        self._texts.clear()
+        self._texts_changed = False
         for region in self.regions:
             region.reset()

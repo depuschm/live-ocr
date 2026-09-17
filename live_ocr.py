@@ -23,7 +23,7 @@ from sinks import EventBus, JsonlSink, WebhookSink, make_event
 from window_track import WindowNotAvailable, WindowTracker
 
 SCREEN_TARGET = "Whole screen"
-SINK_KEYS = ["jsonl_enabled", "jsonl_path", "webhook_enabled", "webhook_url", "webhook_cooldown"]
+SINK_KEYS = ["jsonl_enabled", "jsonl_path", "webhook_enabled", "webhook_url", "webhook_cooldown", "snapshot_events"]
 
 
 # --------------------------------------------------------------------------
@@ -120,6 +120,7 @@ class OutputsDialog(tk.Toplevel):
         self.hook_on = tk.BooleanVar(value=cfg["webhook_enabled"])
         self.url = tk.StringVar(value=cfg["webhook_url"])
         self.cooldown = tk.StringVar(value=str(cfg["webhook_cooldown"]))
+        self.snapshot = tk.BooleanVar(value=cfg["snapshot_events"])
 
         body = ttk.Frame(self, padding=12)
         body.pack(fill="both", expand=True)
@@ -154,6 +155,16 @@ class OutputsDialog(tk.Toplevel):
         ttk.Spinbox(
             row3, from_=0, to=3600, increment=1, width=6, textvariable=self.cooldown
         ).pack(side="left", padx=(8, 0))
+
+        ttk.Checkbutton(
+            body, variable=self.snapshot,
+            text="Send one snapshot of all regions per pass instead of single lines",
+        ).pack(anchor="w", pady=(10, 0))
+        ttk.Label(
+            body, foreground="#777", wraplength=440, justify="left",
+            text="For consumers that need every region's value together. "
+                 "Set the cooldown low (0-1 s) so snapshots are not throttled.",
+        ).pack(anchor="w")
 
         self.note = ttk.Label(body, text="", wraplength=440, justify="left")
         self.note.pack(anchor="w", pady=(10, 0))
@@ -231,6 +242,7 @@ class OutputsDialog(tk.Toplevel):
             "webhook_enabled": self.hook_on.get(),
             "webhook_url": url,
             "webhook_cooldown": cooldown,
+            "snapshot_events": self.snapshot.get(),
         }
         self.destroy()
 
@@ -261,7 +273,7 @@ class App:
         self.reader.preview_processed = settings["preview_processed"]
 
         self.sink_cfg = {k: settings[k] for k in SINK_KEYS}
-        self.bus = EventBus(on_error=self._sink_error)
+        self.bus = EventBus(on_error=self._sink_error, on_reply=self._sink_reply)
         self.bus.start()
         self.reader.bus = self.bus
         self.reader.profile = self.profile
@@ -731,9 +743,14 @@ class App:
         """Called from the sink thread - hand to the UI through the queue."""
         self.queue.put(("status", msg))
 
+    def _sink_reply(self, reply):
+        """A consumer answered a webhook. Sink thread - go through the queue."""
+        self.queue.put(("reply", reply))
+
     def _apply_sinks(self):
         sinks = []
         cfg = self.sink_cfg
+        self.reader.snapshot_events = cfg["snapshot_events"]
         if cfg["jsonl_enabled"] and cfg["jsonl_path"]:
             sinks.append(JsonlSink(cfg["jsonl_path"]))
         if cfg["webhook_enabled"] and cfg["webhook_url"]:
@@ -840,6 +857,8 @@ class App:
                     self._show_preview(*payload)
                 elif kind == "status":
                     self._status(payload)
+                elif kind == "reply":
+                    self._append(payload["message"], source=f"<- {payload.get('consumer', 'consumer')}")
                 elif kind == "ready":
                     self.toggle_btn.config(state="normal")
                     self.reader.start()

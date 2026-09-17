@@ -152,7 +152,14 @@ class WindowTracker:
         if pwc is None:
             raise WindowNotAvailable("pywinctl is not installed")
         try:
-            matches = pwc.getWindowsWithTitle(title)
+            if title.endswith("*"):
+                # Prefix match, for apps whose title changes as they run
+                # (a document name, a counter). Saved as "Name*".
+                prefix = title[:-1]
+                exact = next((t for t in pwc.getAllTitles() if t.startswith(prefix)), None)
+                matches = pwc.getWindowsWithTitle(exact) if exact else []
+            else:
+                matches = pwc.getWindowsWithTitle(title)
         except Exception as e:
             raise WindowNotAvailable(f"Could not query windows: {e}")
         if not matches:

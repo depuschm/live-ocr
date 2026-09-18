@@ -298,7 +298,10 @@ class OCREngine:
         try:
             from rapidocr_onnxruntime import RapidOCR
 
-            self._engine = RapidOCR()
+            # The angle classifier decides whether a line is upside down and
+            # flips it. Screen text never is, and on a lone glyph it turns a
+            # 9 into a 6, so it is off.
+            self._engine = RapidOCR(use_cls=False)
             self.backend = "RapidOCR"
             return
         except ImportError:

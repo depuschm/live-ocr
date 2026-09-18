@@ -184,19 +184,20 @@ class Region:
             # A saved region comes back with a title but no tracker, and the
             # window may not exist yet. Retry each cycle so it starts working
             # whenever the app is opened.
-            if self.tracker is None:
+            # The worker and the preview thread both resolve the same region,
+            # and either may drop the tracker when its window goes away, so
+            # work through a local reference rather than the attribute.
+            tracker = self.tracker
+            if tracker is None:
                 if not self.window_title:
                     raise WindowNotAvailable(f"{self.name}: no window attached")
-                self.tracker = WindowTracker()
+                tracker = WindowTracker()
                 like = (self.rel.base_w, self.rel.base_h) if self.rel is not None else None
-                try:
-                    self.tracker.attach(self.window_title, like=like)
-                except WindowNotAvailable:
-                    self.tracker = None
-                    raise
+                tracker.attach(self.window_title, like=like)   # raises if not there
+                self.tracker = tracker
 
             try:
-                box = self.tracker.box()
+                box = tracker.box()
             except WindowNotAvailable:
                 # Drop the handle so the next cycle looks the window up again,
                 # e.g. a new window replacing one that closed.
@@ -509,7 +510,12 @@ class ScreenReader(threading.Thread):
                 return
             if not region.enabled:
                 continue
-            prepared = self._prepare(sct, region)
+            try:
+                prepared = self._prepare(sct, region)
+            except Exception as e:
+                # One region must never take the capture thread down with it.
+                self._status(region.name, f"{region.name}: {type(e).__name__} - {e}")
+                continue
             if prepared is None:
                 continue
             if region.send_image:

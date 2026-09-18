@@ -158,6 +158,14 @@ def load(name):
     return regions, settings
 
 
+def stamp(name):
+    """When a profile file was last written, or None if it is not there."""
+    try:
+        return path_for(name).stat().st_mtime_ns
+    except OSError:
+        return None
+
+
 def save(name, regions, settings):
     payload = {
         "version": VERSION,

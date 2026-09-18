@@ -258,6 +258,7 @@ class App:
 
         self.profile = config.get_active()
         saved_regions, settings = config.load(self.profile)
+        self._profile_stamp = config.stamp(self.profile)
 
         self.autoscroll = tk.BooleanVar(value=True)
         self.on_top = tk.BooleanVar(value=settings["always_on_top"])
@@ -651,6 +652,7 @@ class App:
         self.reader.running.clear()
 
         regions, settings = config.load(name)
+        self._profile_stamp = config.stamp(name)
         self.profile = name
         self.reader.regions = regions
         self.reader.interval = settings["interval"]
@@ -836,9 +838,21 @@ class App:
         self._status(f"{region.name}: {how}")
 
     def _save(self):
-        """Persist the active profile. Silent on success."""
+        """
+        Persist the active profile. Silent on success.
+
+        A profile file rewritten outside live-ocr (by a script that generates
+        regions, say) is not overwritten with what this window still holds:
+        whoever wrote it knows something this window does not.
+        """
+        stamp = config.stamp(self.profile)
+        if self._profile_stamp is not None and stamp != self._profile_stamp:
+            self._status(f"{self.profile} changed on disk - not saving over it. "
+                         f"Pick it again in the profile list to load the new one.")
+            return
         if not config.save(self.profile, self.reader.regions, self._settings()):
             self._status(f"Could not write {config.path_for(self.profile)}")
+        self._profile_stamp = config.stamp(self.profile)
         config.set_active(self.profile)
 
     def _on_select_region(self, _event=None):

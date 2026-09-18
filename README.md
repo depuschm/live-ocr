@@ -70,6 +70,8 @@ Regions also dedupe independently, so the same value appearing in two of them is
 
 ### Profiles
 
+
+A profile file rewritten outside live-ocr, by a script that generates regions for instance, is not overwritten with what the window still holds: live-ocr says so in the status bar and leaves the file alone. Pick the profile again in the list to load the new version.
 Each profile holds its own regions and settings, so you can keep one set up for build logs, another for a trading screen, and switch between them from the dropdown. The active profile shows in the window title.
 
 | Control | What it does |

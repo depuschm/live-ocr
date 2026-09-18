@@ -145,6 +145,7 @@ class Region:
         self.window_title = window_title
         self.enabled = True
         self.combine = True              # read in one OCR call with other regions
+        self.send_image = False          # publish pixels instead of reading text
 
         self.abs_region = None           # dict, used in screen mode
         self.rel = None                  # RelativeRegion, used in window mode
@@ -219,6 +220,7 @@ class Region:
             "window_title": self.window_title,
             "enabled": self.enabled,
             "combine": self.combine,
+            "send_image": self.send_image,
             "abs_region": self.abs_region,
             "rel": self.rel.to_dict() if self.rel is not None else None,
         }
@@ -237,6 +239,7 @@ class Region:
         )
         region.enabled = bool(d.get("enabled", True))
         region.combine = bool(d.get("combine", True))
+        region.send_image = bool(d.get("send_image", False))
         region.abs_region = d.get("abs_region")
         rel = d.get("rel")
         region.rel = RelativeRegion.from_dict(rel) if rel else None
@@ -466,6 +469,7 @@ class ScreenReader(threading.Thread):
                                           # (left, top, right, bottom), set by the UI
 
         self._texts = {}                  # region name -> latest OCR text
+        self._images = {}                 # region name -> latest PNG, base64
         self._texts_changed = False
 
         self._last_status = {}
@@ -508,6 +512,8 @@ class ScreenReader(threading.Thread):
             prepared = self._prepare(sct, region)
             if prepared is None:
                 continue
+            if region.send_image:
+                continue          # pixels were published; nothing to read
             read += 1
             if region.combine:
                 combined[region] = prepared
@@ -584,6 +590,12 @@ class ScreenReader(threading.Thread):
         # Preview after preprocessing, so "what OCR sees" is literally true -
         # with enhancement off, prepared is the raw frame and both agree.
         self._send_preview(region, prepared if self.preview_processed else frame)
+
+        if region.send_image:
+            # A consumer that compares pixels (an icon, a card face) needs the
+            # region as captured, not OCR's guess at it.
+            self._images[region.name] = to_png_b64(frame)
+            self._texts_changed = True
         return prepared
 
     def _finish(self, region, text):
@@ -644,7 +656,8 @@ class ScreenReader(threading.Thread):
         self._texts_changed = False
         live = {r.name for r in self.regions if r.enabled}
         texts = {n: t for n, t in self._texts.items() if n in live}
-        self.bus.publish(make_snapshot(self.profile, texts))
+        images = {n: i for n, i in self._images.items() if n in live}
+        self.bus.publish(make_snapshot(self.profile, texts, images))
 
     def _save_shot(self, sct, window_title, folder):
         """
@@ -723,6 +736,7 @@ class ScreenReader(threading.Thread):
     def reset(self):
         self._last_status.clear()
         self._texts.clear()
+        self._images.clear()
         self._texts_changed = False
         for region in self.regions:
             region.reset()

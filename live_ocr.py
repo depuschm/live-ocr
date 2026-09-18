@@ -429,6 +429,9 @@ class App:
         ttk.Button(btns2, text="Combine", width=8, command=self._toggle_combine).pack(
             side="left", padx=(3, 0)
         )
+        ttk.Button(btns2, text="Image", width=7, command=self._toggle_send_image).pack(
+            side="left", padx=(3, 0)
+        )
 
         target = ttk.LabelFrame(parent, text="New region target", padding=6)
         target.pack(fill="x", pady=(8, 0))
@@ -498,7 +501,8 @@ class App:
     def _redraw_list(self, keep=None):
         self.region_list.delete(0, "end")
         for r in self.reader.regions:
-            mark = ("" if r.enabled else "  (off)") + ("" if r.combine else "  (alone)")
+            mark = ("" if r.enabled else "  (off)")
+            mark += "  (image)" if r.send_image else ("" if r.combine else "  (alone)")
             self.region_list.insert("end", f"{r.name}{mark}")
         if keep is not None and 0 <= keep < len(self.reader.regions):
             self.region_list.selection_set(keep)
@@ -817,6 +821,18 @@ class App:
         self._redraw_list(keep=self._selected_index())
         self._save()
         how = "combined with other regions" if region.combine else "read on its own"
+        self._status(f"{region.name}: {how}")
+
+    def _toggle_send_image(self):
+        region = self._selected_region()
+        if region is None:
+            self._status("Select a region first")
+            return
+        region.send_image = not region.send_image
+        self._redraw_list(keep=self._selected_index())
+        self._save()
+        how = ("sent as an image, not read as text" if region.send_image
+               else "read as text")
         self._status(f"{region.name}: {how}")
 
     def _save(self):

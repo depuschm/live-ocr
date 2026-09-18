@@ -61,6 +61,7 @@ Each region is read once per interval and its text appears in the log tagged wit
 | **Show what OCR sees** | Switch the preview from raw pixels to the preprocessed frame. |
 | **On/Off** | Skip a region without deleting it. Disabled regions show `(off)` and cost nothing. |
 | **Combine** | Read the region together with other regions in one OCR call (the default), or on its own. Turn it off for regions holding a single character, which are easily missed when combined. Regions read on their own show `(alone)`. |
+| **Image** | Send the region's pixels to sinks as a base64 PNG instead of reading text from it. For anything OCR reads badly - an icon, a status light, a card face - where the consumer compares images itself. Snapshots carry these under `images`. Regions sending pixels show `(image)` and cost no OCR time. |
 | **Save shot** | Saves what live-ocr is capturing: a PNG of the whole window the regions are anchored to (or the screen, for screen regions), plus a JSON note of the window box and every region's area within it. Written to `~/.live-ocr/captures/shots/`. Also on **F9**. Useful for checking alignment, or for sending to someone else to look at. |
 
 Each region has its own target, so you can mix freely — one following your editor, another pinned to a fixed corner of the screen.
@@ -168,8 +169,11 @@ For consumers that need all regions at once, tick **Send one snapshot of all reg
 
 ```json
 {"v": 1, "type": "snapshot", "ts": "2026-09-15T02:19:55+00:00", "profile": "Default",
- "regions": {"Status": "Build passed", "Counter": "42"}}
+ "regions": {"Status": "Build passed", "Counter": "42"},
+ "images": {"Icon": "iVBORw0KGgo..."}}
 ```
+
+`images` holds the base64 PNG of each region set to **Image**, and is empty otherwise.
 
 A webhook consumer may answer with a JSON object containing `message` (and optionally `consumer`, used as the log label). live-ocr shows the message in its log. Any other response body is treated as a plain acknowledgement.
 

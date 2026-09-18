@@ -38,7 +38,7 @@ def make_event(profile, region, text):
     }
 
 
-def make_snapshot(profile, regions):
+def make_snapshot(profile, regions, images=None):
     """
     Every region's latest text in one event, sent once per pass.
 
@@ -51,6 +51,7 @@ def make_snapshot(profile, regions):
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "profile": profile,
         "regions": dict(regions),
+        "images": dict(images or {}),   # base64 PNG, for regions set to send pixels
     }
 
 

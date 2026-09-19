@@ -461,6 +461,8 @@ class App:
         self.preview_info.pack(anchor="w", pady=(2, 0))
 
     def _build_output(self, parent):
+        self._build_state_panel(parent)
+
         self.text = tk.Text(
             parent, wrap="word", font=("TkFixedFont", 11),
             width=40, height=12,
@@ -474,6 +476,71 @@ class App:
 
         self.text.tag_configure("stamp", foreground="#6f9dd6", spacing1=8)
         self.text.tag_configure("error", foreground="#e06c75")
+
+    def _build_state_panel(self, parent):
+        """
+        What a consumer says is true now, as opposed to the log, which is what
+        happened. A consumer sends it as "state": a list of label/value pairs.
+        Nothing here knows what the pairs mean.
+        """
+        self.state_frame = ttk.LabelFrame(parent, text="State", padding=(10, 6))
+        self.state_frame.pack(side="top", fill="x", pady=(0, 6))
+
+        self.state_headline = ttk.Label(self.state_frame, text="Waiting for a consumer",
+                                        font=("TkDefaultFont", 12, "bold"), wraplength=520)
+        self.state_headline.pack(anchor="w")
+        self.state_note = ttk.Label(self.state_frame, text="", foreground="#666",
+                                    wraplength=520, justify="left")
+        self.state_note.pack(anchor="w")
+        self.state_pairs = ttk.Frame(self.state_frame)
+        self.state_pairs.pack(anchor="w", fill="x", pady=(6, 0))
+        self.state_age = ttk.Label(self.state_frame, text="", foreground="#888")
+        self.state_age.pack(anchor="e")
+
+        self._state_rows = {}      # label -> (value widget, last value)
+        self._state_at = None      # when the last reply arrived
+        self.root.after(1000, self._age_state)
+
+    def _show_state(self, reply):
+        """Replace the panel with this reply. Changed values flash briefly."""
+        self._state_at = time.monotonic()
+        self.state_headline.config(text=reply.get("message", ""), foreground="")
+        self.state_note.config(text=reply.get("reason", "") if reply.get("reason") != reply.get("message") else "")
+
+        pairs = [(str(a), str(b)) for a, b in reply.get("state") or []]
+        if {label for label, _ in pairs} != set(self._state_rows):
+            for child in self.state_pairs.winfo_children():
+                child.destroy()
+            self._state_rows = {}
+            for row, (label, _) in enumerate(pairs):
+                ttk.Label(self.state_pairs, text=label, foreground="#777").grid(
+                    row=row, column=0, sticky="w", padx=(0, 12))
+                value = ttk.Label(self.state_pairs, text="")
+                value.grid(row=row, column=1, sticky="w")
+                self._state_rows[label] = [value, None]
+
+        for label, value in pairs:
+            widget, before = self._state_rows[label]
+            widget.config(text=value, foreground="#2f7d32" if before not in (None, value) else "")
+            self._state_rows[label][1] = value
+            if before not in (None, value):
+                widget.after(1500, lambda w=widget: w.config(foreground=""))
+
+        warnings = reply.get("warnings") or []
+        self.state_age.config(text=f"{len(warnings)} warning{'s' if len(warnings) != 1 else ''}"
+                              if warnings else "")
+
+    def _age_state(self):
+        """Grey the panel once its reply is old: stale advice is worse than none."""
+        self.root.after(1000, self._age_state)
+        if self._state_at is None:
+            return
+        age = int(time.monotonic() - self._state_at)
+        stale = age >= 5
+        self.state_headline.config(foreground="#999" if stale else "")
+        for widget, _ in self._state_rows.values():
+            widget.config(foreground="#999" if stale else widget.cget("foreground") or "")
+        self.state_age.config(text=f"{age}s old" if stale else self.state_age.cget("text"))
 
     # -- engine -----------------------------------------------------------
 
@@ -942,6 +1009,7 @@ class App:
                     secs, n = payload
                     self.pass_info.config(text=f"last pass {secs:.1f} s, {n} read")
                 elif kind == "reply":
+                    self._show_state(payload)
                     self._append(payload["message"], source=f"<- {payload.get('consumer', 'consumer')}")
                 elif kind == "ready":
                     self.toggle_btn.config(state="normal")
